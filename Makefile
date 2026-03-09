@@ -24,3 +24,6 @@ cross-build:
 
 vscode-ext:
 	cd editors/vscode && npm install && npm run compile
+
+vscode-package: cross-build vscode-ext
+	cd editors/vscode && npx @vscode/vsce package

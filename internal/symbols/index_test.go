@@ -1,0 +1,244 @@
+package symbols
+
+import (
+	"os"
+	"path/filepath"
+	"runtime"
+	"testing"
+)
+
+func testdataPath() string {
+	_, file, _, _ := runtime.Caller(0)
+	return filepath.Join(filepath.Dir(file), "..", "..", "testdata", "project")
+}
+
+func readTestFile(t *testing.T, relPath string) string {
+	t.Helper()
+	content, err := os.ReadFile(filepath.Join(testdataPath(), relPath))
+	if err != nil {
+		t.Fatalf("failed to read %s: %v", relPath, err)
+	}
+	return string(content)
+}
+
+func setupIndex(t *testing.T) *Index {
+	t.Helper()
+	idx := NewIndex()
+	idx.RegisterBuiltins()
+
+	idx.IndexFile("file:///project/vendor/monolog/monolog/src/Monolog/Logger.php",
+		readTestFile(t, "vendor/monolog/monolog/src/Monolog/Logger.php"))
+	idx.IndexFile("file:///project/vendor/monolog/monolog/src/Monolog/Handler/StreamHandler.php",
+		readTestFile(t, "vendor/monolog/monolog/src/Monolog/Handler/StreamHandler.php"))
+	idx.IndexFile("file:///project/src/Service.php",
+		readTestFile(t, "src/Service.php"))
+
+	return idx
+}
+
+func TestIndexClassLookup(t *testing.T) {
+	idx := setupIndex(t)
+
+	tests := []struct {
+		fqn  string
+		kind SymbolKind
+	}{
+		{"Monolog\\Logger", KindClass},
+		{"Monolog\\Handler\\StreamHandler", KindClass},
+		{"App\\Service", KindClass},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.fqn, func(t *testing.T) {
+			sym := idx.Lookup(tt.fqn)
+			if sym == nil {
+				t.Fatalf("expected symbol %q, got nil", tt.fqn)
+			}
+			if sym.Kind != tt.kind {
+				t.Errorf("expected kind %d, got %d", tt.kind, sym.Kind)
+			}
+		})
+	}
+}
+
+func TestIndexMethodLookup(t *testing.T) {
+	idx := setupIndex(t)
+
+	tests := []struct {
+		fqn        string
+		returnType string
+	}{
+		{"Monolog\\Logger::info", "bool"},
+		{"Monolog\\Logger::error", "bool"},
+		{"Monolog\\Logger::create", "self"},
+		{"Monolog\\Handler\\StreamHandler::getLogger", "Monolog\\Logger"},
+		{"Monolog\\Handler\\StreamHandler::handle", "bool"},
+		{"App\\Service::run", "void"},
+		{"App\\Service::helper", "void"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.fqn, func(t *testing.T) {
+			sym := idx.Lookup(tt.fqn)
+			if sym == nil {
+				t.Fatalf("expected symbol %q, got nil", tt.fqn)
+			}
+			if sym.Kind != KindMethod {
+				t.Errorf("expected KindMethod, got %d", sym.Kind)
+			}
+			if sym.ReturnType != tt.returnType {
+				t.Errorf("expected return type %q, got %q", tt.returnType, sym.ReturnType)
+			}
+		})
+	}
+}
+
+func TestIndexTypeResolution(t *testing.T) {
+	idx := setupIndex(t)
+
+	t.Run("property type resolved to FQN", func(t *testing.T) {
+		// App\Service has `private Logger $logger` with `use Monolog\Logger`
+		sym := idx.Lookup("App\\Service::$logger")
+		if sym == nil {
+			t.Fatal("expected property symbol, got nil")
+		}
+		if sym.Type != "Monolog\\Logger" {
+			t.Errorf("expected type %q, got %q", "Monolog\\Logger", sym.Type)
+		}
+	})
+
+	t.Run("method return type resolved to FQN", func(t *testing.T) {
+		// StreamHandler::getLogger returns Logger, resolved via use to Monolog\Logger
+		sym := idx.Lookup("Monolog\\Handler\\StreamHandler::getLogger")
+		if sym == nil {
+			t.Fatal("expected method symbol, got nil")
+		}
+		if sym.ReturnType != "Monolog\\Logger" {
+			t.Errorf("expected return type %q, got %q", "Monolog\\Logger", sym.ReturnType)
+		}
+	})
+
+	t.Run("param type resolved to FQN", func(t *testing.T) {
+		sym := idx.Lookup("App\\Service::__construct")
+		if sym == nil {
+			t.Fatal("expected method symbol, got nil")
+		}
+		if len(sym.Params) == 0 {
+			t.Fatal("expected params, got none")
+		}
+		if sym.Params[0].Type != "Monolog\\Logger" {
+			t.Errorf("expected param type %q, got %q", "Monolog\\Logger", sym.Params[0].Type)
+		}
+	})
+
+	t.Run("builtin types not namespace-qualified", func(t *testing.T) {
+		sym := idx.Lookup("Monolog\\Logger::info")
+		if sym == nil {
+			t.Fatal("expected method symbol, got nil")
+		}
+		if sym.ReturnType != "bool" {
+			t.Errorf("expected return type %q, got %q", "bool", sym.ReturnType)
+		}
+		if len(sym.Params) < 1 {
+			t.Fatal("expected params")
+		}
+		if sym.Params[0].Type != "string" {
+			t.Errorf("expected param type %q, got %q", "string", sym.Params[0].Type)
+		}
+	})
+}
+
+func TestIndexLookupByName(t *testing.T) {
+	idx := setupIndex(t)
+
+	syms := idx.LookupByName("Logger")
+	if len(syms) == 0 {
+		t.Fatal("expected to find Logger by name")
+	}
+	found := false
+	for _, sym := range syms {
+		if sym.FQN == "Monolog\\Logger" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Error("expected Monolog\\Logger in LookupByName results")
+	}
+}
+
+func TestIndexInheritanceChain(t *testing.T) {
+	idx := NewIndex()
+	// Create a simple inheritance: Child extends Parent
+	idx.IndexFile("file:///parent.php", `<?php
+namespace App;
+class BaseModel {
+    public function save(): bool { return true; }
+}`)
+	idx.IndexFile("file:///child.php", `<?php
+namespace App;
+class User extends BaseModel {
+    public string $name;
+}`)
+
+	chain := idx.GetInheritanceChain("App\\User")
+	if len(chain) == 0 {
+		t.Fatal("expected inheritance chain")
+	}
+	if chain[0] != "App\\BaseModel" {
+		t.Errorf("expected parent %q, got %q", "App\\BaseModel", chain[0])
+	}
+}
+
+func TestIndexGetClassMembers(t *testing.T) {
+	idx := setupIndex(t)
+
+	members := idx.GetClassMembers("Monolog\\Logger")
+	if len(members) == 0 {
+		t.Fatal("expected class members")
+	}
+
+	memberNames := make(map[string]bool)
+	for _, m := range members {
+		memberNames[m.Name] = true
+	}
+
+	for _, expected := range []string{"info", "error", "create"} {
+		if !memberNames[expected] {
+			t.Errorf("expected member %q in Monolog\\Logger", expected)
+		}
+	}
+}
+
+func TestIndexReindex(t *testing.T) {
+	idx := NewIndex()
+	uri := "file:///test.php"
+
+	idx.IndexFile(uri, `<?php
+class Foo {
+    public function bar(): void {}
+}`)
+
+	if idx.Lookup("Foo") == nil {
+		t.Fatal("Foo should exist")
+	}
+	if idx.Lookup("Foo::bar") == nil {
+		t.Fatal("Foo::bar should exist")
+	}
+
+	// Reindex with different content
+	idx.IndexFile(uri, `<?php
+class Baz {
+    public function qux(): void {}
+}`)
+
+	if idx.Lookup("Foo") != nil {
+		t.Error("Foo should have been removed after reindex")
+	}
+	if idx.Lookup("Baz") == nil {
+		t.Fatal("Baz should exist after reindex")
+	}
+	if idx.Lookup("Baz::qux") == nil {
+		t.Fatal("Baz::qux should exist after reindex")
+	}
+}

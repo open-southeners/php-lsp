@@ -128,6 +128,11 @@ type DocBlock struct {
 }
 
 func ParseFile(source string) *FileNode {
+	defer func() {
+		if recover() != nil {
+			// Invalid or unsupported source should not bring down the LSP process.
+		}
+	}()
 	result := New().Parse(source)
 	if result == nil {
 		return nil

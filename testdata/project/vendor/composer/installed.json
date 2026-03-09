@@ -1,0 +1,13 @@
+{
+    "packages": [
+        {
+            "name": "monolog/monolog",
+            "install-path": "../monolog/monolog",
+            "autoload": {
+                "psr-4": {
+                    "Monolog\\": "src/Monolog/"
+                }
+            }
+        }
+    ]
+}

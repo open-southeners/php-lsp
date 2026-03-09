@@ -2,8 +2,11 @@ package diagnostics
 
 import (
 	"fmt"
+	"log"
 	"strings"
+	"sync"
 
+	"github.com/open-southeners/php-lsp/internal/config"
 	"github.com/open-southeners/php-lsp/internal/parser"
 	"github.com/open-southeners/php-lsp/internal/protocol"
 	"github.com/open-southeners/php-lsp/internal/symbols"
@@ -12,22 +15,67 @@ import (
 type Provider struct {
 	index     *symbols.Index
 	framework string
+	rootPath  string
+	logger    *log.Logger
+	cfg       *config.Config
+	phpstan   *phpstanRunner
+	pint      *pintRunner
+
+	mu          sync.RWMutex
+	toolResults map[string][]protocol.Diagnostic
 }
 
-func NewProvider(index *symbols.Index, framework string) *Provider {
-	return &Provider{index: index, framework: framework}
+func NewProvider(index *symbols.Index, framework, rootPath string, logger *log.Logger, cfg *config.Config) *Provider {
+	p := &Provider{
+		index:       index,
+		framework:   framework,
+		rootPath:    rootPath,
+		logger:      logger,
+		cfg:         cfg,
+		toolResults: make(map[string][]protocol.Diagnostic),
+	}
+	p.phpstan = newPHPStanRunner(rootPath, cfg, logger)
+	p.pint = newPintRunner(rootPath, cfg, logger)
+	return p
 }
 
+// Analyze runs fast static checks and merges cached external tool results.
 func (p *Provider) Analyze(uri, source string) []protocol.Diagnostic {
 	var diags []protocol.Diagnostic
 	file := parser.ParseFile(source)
-	if file == nil {
-		return diags
+	if file != nil {
+		diags = append(diags, p.checkDeprecations(source)...)
+		diags = append(diags, p.checkClassStructure(file)...)
+		diags = append(diags, p.checkUnusedImports(file, source)...)
 	}
-	diags = append(diags, p.checkDeprecations(source)...)
-	diags = append(diags, p.checkClassStructure(file)...)
-	diags = append(diags, p.checkUnusedImports(file, source)...)
+	p.mu.RLock()
+	if cached, ok := p.toolResults[uri]; ok {
+		diags = append(diags, cached...)
+	}
+	p.mu.RUnlock()
 	return diags
+}
+
+// RunTools executes external analysis tools (PHPStan, Pint) on a file.
+// Results are cached and included in subsequent Analyze calls.
+func (p *Provider) RunTools(uri, filePath string) {
+	var toolDiags []protocol.Diagnostic
+	if p.phpstan.available() {
+		toolDiags = append(toolDiags, p.phpstan.analyze(filePath)...)
+	}
+	if p.pint.available() {
+		toolDiags = append(toolDiags, p.pint.analyze(filePath)...)
+	}
+	p.mu.Lock()
+	p.toolResults[uri] = toolDiags
+	p.mu.Unlock()
+}
+
+// ClearCache removes cached tool results for a URI.
+func (p *Provider) ClearCache(uri string) {
+	p.mu.Lock()
+	delete(p.toolResults, uri)
+	p.mu.Unlock()
 }
 
 func (p *Provider) checkDeprecations(source string) []protocol.Diagnostic {
@@ -43,7 +91,7 @@ func (p *Provider) checkDeprecations(source string) []protocol.Diagnostic {
 		for _, dep := range patterns {
 			if col := strings.Index(line, dep[0]); col >= 0 {
 				diags = append(diags, protocol.Diagnostic{
-					Range:    protocol.Range{Start: protocol.Position{Line: i, Character: col}, End: protocol.Position{Line: i, Character: col + len(dep[0])}},
+					Range:    protocol.Range{Start: protocol.Position{Line: i, Character: col}, End: protocol.Position{Line: i, Character: col + len(dep[0]) - 1}},
 					Severity: protocol.DiagnosticSeverityWarning, Source: "php-lsp", Message: dep[1], Code: "deprecated",
 				})
 			}

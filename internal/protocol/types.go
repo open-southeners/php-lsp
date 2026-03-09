@@ -188,10 +188,11 @@ type DidSaveTextDocumentParams struct {
 
 // InitializeParams for the initialize request.
 type InitializeParams struct {
-	ProcessID    *int   `json:"processId"`
-	RootURI      string `json:"rootUri"`
-	RootPath     string `json:"rootPath"`
-	Capabilities struct {
+	ProcessID             *int                    `json:"processId"`
+	RootURI               string                  `json:"rootUri"`
+	RootPath              string                  `json:"rootPath"`
+	InitializationOptions *InitializationOptions  `json:"initializationOptions,omitempty"`
+	Capabilities          struct {
 		TextDocument struct {
 			Completion struct {
 				CompletionItem struct {
@@ -200,6 +201,23 @@ type InitializeParams struct {
 			} `json:"completion"`
 		} `json:"textDocument"`
 	} `json:"capabilities"`
+}
+
+// InitializationOptions sent by the client during initialization.
+type InitializationOptions struct {
+	PHPVersion         string   `json:"phpVersion,omitempty"`
+	Framework          string   `json:"framework,omitempty"`
+	ContainerAware     *bool    `json:"containerAware,omitempty"`
+	DiagnosticsEnabled *bool    `json:"diagnosticsEnabled,omitempty"`
+	PHPStanEnabled     *bool    `json:"phpstanEnabled,omitempty"`
+	PHPStanPath        string   `json:"phpstanPath,omitempty"`
+	PHPStanLevel       string   `json:"phpstanLevel,omitempty"`
+	PHPStanConfig      string   `json:"phpstanConfig,omitempty"`
+	PintEnabled        *bool    `json:"pintEnabled,omitempty"`
+	PintPath           string   `json:"pintPath,omitempty"`
+	PintConfig         string   `json:"pintConfig,omitempty"`
+	MaxIndexFiles      *int     `json:"maxIndexFiles,omitempty"`
+	ExcludePaths       []string `json:"excludePaths,omitempty"`
 }
 
 // InitializeResult for the initialize response.
@@ -214,9 +232,21 @@ type ServerInfo struct {
 	Version string `json:"version"`
 }
 
+// TextDocumentSyncOptions describes how text document syncing works.
+type TextDocumentSyncOptions struct {
+	OpenClose bool              `json:"openClose"`
+	Change    int               `json:"change"` // 0=None, 1=Full, 2=Incremental
+	Save      *SaveOptions     `json:"save,omitempty"`
+}
+
+// SaveOptions for textDocument/didSave notifications.
+type SaveOptions struct {
+	IncludeText bool `json:"includeText"`
+}
+
 // ServerCapabilities declares server capabilities.
 type ServerCapabilities struct {
-	TextDocumentSync           int                         `json:"textDocumentSync"`
+	TextDocumentSync           TextDocumentSyncOptions     `json:"textDocumentSync"`
 	CompletionProvider         *CompletionOptions          `json:"completionProvider,omitempty"`
 	HoverProvider              bool                        `json:"hoverProvider"`
 	DefinitionProvider         bool                        `json:"definitionProvider"`

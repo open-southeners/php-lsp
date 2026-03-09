@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+
+	"github.com/open-southeners/php-lsp/internal/protocol"
 )
 
 // Config holds the LSP server configuration.
@@ -15,6 +17,13 @@ type Config struct {
 	ExcludePaths       []string `json:"excludePaths"`
 	ContainerAware     bool     `json:"containerAware"`
 	DiagnosticsEnabled bool     `json:"diagnosticsEnabled"`
+	PHPStanEnabled     *bool    `json:"phpstanEnabled,omitempty"`
+	PHPStanPath        string   `json:"phpstanPath,omitempty"`
+	PHPStanLevel       string   `json:"phpstanLevel,omitempty"`
+	PHPStanConfig      string   `json:"phpstanConfig,omitempty"`
+	PintEnabled        *bool    `json:"pintEnabled,omitempty"`
+	PintPath           string   `json:"pintPath,omitempty"`
+	PintConfig         string   `json:"pintConfig,omitempty"`
 	MaxIndexFiles      int      `json:"maxIndexFiles"`
 	StubsPath          string   `json:"stubsPath"`
 	LogLevel           string   `json:"logLevel"`
@@ -48,6 +57,50 @@ func LoadFromFile(path string) (*Config, error) {
 		return nil, err
 	}
 	return cfg, nil
+}
+
+// MergeClientOptions applies client-provided initializationOptions over
+// the current config. Only non-zero values from the client override.
+func (c *Config) MergeClientOptions(opts *protocol.InitializationOptions) {
+	if opts.PHPVersion != "" {
+		c.PHPVersion = opts.PHPVersion
+	}
+	if opts.Framework != "" {
+		c.Framework = opts.Framework
+	}
+	if opts.ContainerAware != nil {
+		c.ContainerAware = *opts.ContainerAware
+	}
+	if opts.DiagnosticsEnabled != nil {
+		c.DiagnosticsEnabled = *opts.DiagnosticsEnabled
+	}
+	if opts.PHPStanEnabled != nil {
+		c.PHPStanEnabled = opts.PHPStanEnabled
+	}
+	if opts.PHPStanPath != "" {
+		c.PHPStanPath = opts.PHPStanPath
+	}
+	if opts.PHPStanLevel != "" {
+		c.PHPStanLevel = opts.PHPStanLevel
+	}
+	if opts.PHPStanConfig != "" {
+		c.PHPStanConfig = opts.PHPStanConfig
+	}
+	if opts.PintEnabled != nil {
+		c.PintEnabled = opts.PintEnabled
+	}
+	if opts.PintPath != "" {
+		c.PintPath = opts.PintPath
+	}
+	if opts.PintConfig != "" {
+		c.PintConfig = opts.PintConfig
+	}
+	if opts.MaxIndexFiles != nil {
+		c.MaxIndexFiles = *opts.MaxIndexFiles
+	}
+	if len(opts.ExcludePaths) > 0 {
+		c.ExcludePaths = opts.ExcludePaths
+	}
 }
 
 func DetectFramework(rootPath string) string {

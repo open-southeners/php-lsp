@@ -82,23 +82,27 @@ func (idx *Index) IndexFile(uri string, source string) {
 	idx.removeFileSymbols(uri)
 	ns := file.Namespace
 
+	resolve := func(name string) string {
+		return resolveTypeName(name, ns, file.Uses)
+	}
+
 	for _, c := range file.Classes {
 		fqn := buildFQN(ns, c.Name)
 		sym := &Symbol{Name: c.Name, FQN: fqn, Kind: KindClass, URI: uri, DocComment: c.DocComment,
 			Range: protocol.Range{Start: protocol.Position{Line: c.StartLine, Character: c.StartCol}}}
 		idx.addSymbol(uri, sym)
 		if c.Extends != "" {
-			idx.inheritanceMap[fqn] = resolveTypeName(c.Extends, ns, file.Uses)
+			idx.inheritanceMap[fqn] = resolve(c.Extends)
 		}
 		for _, impl := range c.Implements {
-			idx.implementsMap[fqn] = append(idx.implementsMap[fqn], resolveTypeName(impl, ns, file.Uses))
+			idx.implementsMap[fqn] = append(idx.implementsMap[fqn], resolve(impl))
 		}
 		for _, tr := range c.Traits {
-			idx.traitMap[fqn] = append(idx.traitMap[fqn], resolveTypeName(tr, ns, file.Uses))
+			idx.traitMap[fqn] = append(idx.traitMap[fqn], resolve(tr))
 		}
 		for _, prop := range c.Properties {
 			ps := &Symbol{Name: prop.Name, FQN: fqn + "::" + prop.Name, Kind: KindProperty, URI: uri,
-				Visibility: prop.Visibility, IsStatic: prop.IsStatic, Type: prop.Type.Name,
+				Visibility: prop.Visibility, IsStatic: prop.IsStatic, Type: resolve(prop.Type.Name),
 				DocComment: prop.DocComment, ParentFQN: fqn,
 				Range: protocol.Range{Start: protocol.Position{Line: prop.StartLine}}}
 			sym.Children = append(sym.Children, ps)
@@ -106,11 +110,11 @@ func (idx *Index) IndexFile(uri string, source string) {
 		}
 		for _, m := range c.Methods {
 			ms := &Symbol{Name: m.Name, FQN: fqn + "::" + m.Name, Kind: KindMethod, URI: uri,
-				Visibility: m.Visibility, IsStatic: m.IsStatic, ReturnType: m.ReturnType.Name,
+				Visibility: m.Visibility, IsStatic: m.IsStatic, ReturnType: resolve(m.ReturnType.Name),
 				DocComment: m.DocComment, ParentFQN: fqn,
 				Range: protocol.Range{Start: protocol.Position{Line: m.StartLine}}}
 			for _, p := range m.Params {
-				ms.Params = append(ms.Params, ParamInfo{Name: p.Name, Type: p.Type.Name, IsVariadic: p.IsVariadic, IsReference: p.IsReference})
+				ms.Params = append(ms.Params, ParamInfo{Name: p.Name, Type: resolve(p.Type.Name), IsVariadic: p.IsVariadic, IsReference: p.IsReference})
 			}
 			sym.Children = append(sym.Children, ms)
 			idx.addSymbol(uri, ms)
@@ -130,7 +134,10 @@ func (idx *Index) IndexFile(uri string, source string) {
 		idx.addSymbol(uri, sym)
 		for _, m := range iface.Methods {
 			ms := &Symbol{Name: m.Name, FQN: fqn + "::" + m.Name, Kind: KindMethod, URI: uri,
-				Visibility: m.Visibility, ReturnType: m.ReturnType.Name, DocComment: m.DocComment, ParentFQN: fqn}
+				Visibility: m.Visibility, ReturnType: resolve(m.ReturnType.Name), DocComment: m.DocComment, ParentFQN: fqn}
+			for _, p := range m.Params {
+				ms.Params = append(ms.Params, ParamInfo{Name: p.Name, Type: resolve(p.Type.Name), IsVariadic: p.IsVariadic, IsReference: p.IsReference})
+			}
 			sym.Children = append(sym.Children, ms)
 			idx.addSymbol(uri, ms)
 		}
@@ -140,6 +147,25 @@ func (idx *Index) IndexFile(uri string, source string) {
 		fqn := buildFQN(ns, tr.Name)
 		sym := &Symbol{Name: tr.Name, FQN: fqn, Kind: KindTrait, URI: uri, DocComment: tr.DocComment}
 		idx.addSymbol(uri, sym)
+		for _, prop := range tr.Properties {
+			ps := &Symbol{Name: prop.Name, FQN: fqn + "::" + prop.Name, Kind: KindProperty, URI: uri,
+				Visibility: prop.Visibility, IsStatic: prop.IsStatic, Type: resolve(prop.Type.Name),
+				DocComment: prop.DocComment, ParentFQN: fqn,
+				Range: protocol.Range{Start: protocol.Position{Line: prop.StartLine}}}
+			sym.Children = append(sym.Children, ps)
+			idx.addSymbol(uri, ps)
+		}
+		for _, m := range tr.Methods {
+			ms := &Symbol{Name: m.Name, FQN: fqn + "::" + m.Name, Kind: KindMethod, URI: uri,
+				Visibility: m.Visibility, IsStatic: m.IsStatic, ReturnType: resolve(m.ReturnType.Name),
+				DocComment: m.DocComment, ParentFQN: fqn,
+				Range: protocol.Range{Start: protocol.Position{Line: m.StartLine}}}
+			for _, p := range m.Params {
+				ms.Params = append(ms.Params, ParamInfo{Name: p.Name, Type: resolve(p.Type.Name), IsVariadic: p.IsVariadic, IsReference: p.IsReference})
+			}
+			sym.Children = append(sym.Children, ms)
+			idx.addSymbol(uri, ms)
+		}
 	}
 
 	for _, en := range file.Enums {
@@ -151,14 +177,25 @@ func (idx *Index) IndexFile(uri string, source string) {
 			sym.Children = append(sym.Children, cs)
 			idx.addSymbol(uri, cs)
 		}
+		for _, m := range en.Methods {
+			ms := &Symbol{Name: m.Name, FQN: fqn + "::" + m.Name, Kind: KindMethod, URI: uri,
+				Visibility: m.Visibility, IsStatic: m.IsStatic, ReturnType: resolve(m.ReturnType.Name),
+				DocComment: m.DocComment, ParentFQN: fqn,
+				Range: protocol.Range{Start: protocol.Position{Line: m.StartLine}}}
+			for _, p := range m.Params {
+				ms.Params = append(ms.Params, ParamInfo{Name: p.Name, Type: resolve(p.Type.Name), IsVariadic: p.IsVariadic, IsReference: p.IsReference})
+			}
+			sym.Children = append(sym.Children, ms)
+			idx.addSymbol(uri, ms)
+		}
 	}
 
 	for _, fn := range file.Functions {
 		fqn := buildFQN(ns, fn.Name)
-		sym := &Symbol{Name: fn.Name, FQN: fqn, Kind: KindFunction, URI: uri, ReturnType: fn.ReturnType.Name,
+		sym := &Symbol{Name: fn.Name, FQN: fqn, Kind: KindFunction, URI: uri, ReturnType: resolve(fn.ReturnType.Name),
 			DocComment: fn.DocComment, Range: protocol.Range{Start: protocol.Position{Line: fn.StartLine}}}
 		for _, p := range fn.Params {
-			sym.Params = append(sym.Params, ParamInfo{Name: p.Name, Type: p.Type.Name, IsVariadic: p.IsVariadic, IsReference: p.IsReference})
+			sym.Params = append(sym.Params, ParamInfo{Name: p.Name, Type: resolve(p.Type.Name), IsVariadic: p.IsVariadic, IsReference: p.IsReference})
 		}
 		idx.addSymbol(uri, sym)
 	}
@@ -388,23 +425,70 @@ func buildFQN(namespace, name string) string {
 	return namespace + "\\" + name
 }
 
+var phpBuiltinTypes = map[string]bool{
+	"string": true, "int": true, "float": true, "bool": true, "array": true,
+	"object": true, "callable": true, "iterable": true, "void": true, "never": true,
+	"null": true, "false": true, "true": true, "mixed": true, "self": true,
+	"static": true, "parent": true, "resource": true,
+}
+
 func resolveTypeName(name string, currentNs string, uses []parser.UseNode) string {
+	if name == "" {
+		return ""
+	}
+	// Strip nullable prefix for resolution, then re-add
+	prefix := ""
+	if strings.HasPrefix(name, "?") {
+		prefix = "?"
+		name = name[1:]
+	}
+	// Handle union/intersection types
+	if strings.ContainsAny(name, "|&") {
+		var parts []string
+		for _, part := range splitTypeExpr(name) {
+			parts = append(parts, resolveTypeName(part, currentNs, uses))
+		}
+		return prefix + strings.Join(parts, "|")
+	}
+	// Built-in types are never namespace-qualified
+	if phpBuiltinTypes[strings.ToLower(name)] {
+		return prefix + name
+	}
 	if strings.HasPrefix(name, "\\") {
-		return strings.TrimPrefix(name, "\\")
+		return prefix + strings.TrimPrefix(name, "\\")
 	}
 	parts := strings.SplitN(name, "\\", 2)
 	for _, u := range uses {
 		if u.Alias == parts[0] {
 			if len(parts) > 1 {
-				return u.FullName + "\\" + parts[1]
+				return prefix + u.FullName + "\\" + parts[1]
 			}
-			return u.FullName
+			return prefix + u.FullName
 		}
 	}
 	if currentNs != "" {
-		return currentNs + "\\" + name
+		return prefix + currentNs + "\\" + name
 	}
-	return name
+	return prefix + name
+}
+
+func splitTypeExpr(name string) []string {
+	var parts []string
+	current := ""
+	for _, ch := range name {
+		if ch == '|' || ch == '&' {
+			if current != "" {
+				parts = append(parts, current)
+			}
+			current = ""
+		} else {
+			current += string(ch)
+		}
+	}
+	if current != "" {
+		parts = append(parts, current)
+	}
+	return parts
 }
 
 func appendUnique(slice []string, item string) []string {
