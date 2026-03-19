@@ -65,6 +65,50 @@ func TestGetAutoloadPaths(t *testing.T) {
 	})
 }
 
+func TestGetAutoloadFiles(t *testing.T) {
+	root := testdataPath()
+	entries := GetAutoloadPaths(root)
+
+	var projectFile, vendorFile *AutoloadEntry
+	for i := range entries {
+		if !entries[i].IsFile {
+			continue
+		}
+		if !entries[i].IsVendor {
+			projectFile = &entries[i]
+		} else {
+			vendorFile = &entries[i]
+		}
+	}
+
+	t.Run("project autoload files", func(t *testing.T) {
+		if projectFile == nil {
+			t.Fatal("missing project autoload.files entry")
+		}
+		if projectFile.IsVendor {
+			t.Error("project file should not be marked as vendor")
+		}
+		if projectFile.Namespace != "" {
+			t.Errorf("file entries should have empty namespace, got %q", projectFile.Namespace)
+		}
+		if !filepath.IsAbs(projectFile.Path) {
+			t.Errorf("expected absolute path, got %q", projectFile.Path)
+		}
+	})
+
+	t.Run("vendor autoload files", func(t *testing.T) {
+		if vendorFile == nil {
+			t.Fatal("missing vendor autoload.files entry")
+		}
+		if !vendorFile.IsVendor {
+			t.Error("vendor file should be marked as vendor")
+		}
+		if vendorFile.Namespace != "" {
+			t.Errorf("file entries should have empty namespace, got %q", vendorFile.Namespace)
+		}
+	})
+}
+
 func TestGetAutoloadPathsMissing(t *testing.T) {
 	entries := GetAutoloadPaths("/nonexistent/path")
 	if len(entries) != 0 {

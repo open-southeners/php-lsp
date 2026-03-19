@@ -701,6 +701,20 @@ func (p *structParser) isRecoveryPoint() bool {
 	return false
 }
 
+// isKeywordToken returns true for tokens that are PHP keywords but can be
+// used as method names (PHP 7.0+ allows reserved words as method names).
+func isKeywordToken(kind TokenKind) bool {
+	switch kind {
+	case TokenClass, TokenInterface, TokenTrait, TokenEnum, TokenNamespace,
+		TokenFunction, TokenConst, TokenVar,
+		TokenPublic, TokenProtected, TokenPrivate,
+		TokenStatic, TokenAbstract, TokenFinal, TokenReadonly,
+		TokenExtends, TokenImplements, TokenReturn, TokenNew:
+		return true
+	}
+	return false
+}
+
 func (p *structParser) parse() {
 	var lastDocComment string
 	for p.peek().Kind != TokenEOF {
@@ -1089,8 +1103,10 @@ func (p *structParser) parseClassBody() (methods []MethodDef, props []PropertyDe
 				IsAbstract: isAbstract, IsFinal: isFinal,
 				DocComment: docComment, Line: p.peek().Line,
 			}
-			if t, ok := p.expect(TokenIdentifier); ok {
-				m.Name = t.Value
+			// PHP allows reserved keywords as method names (e.g. class(), match())
+			if p.peek().Kind == TokenIdentifier || isKeywordToken(p.peek().Kind) {
+				m.Name = p.peek().Value
+				p.advance()
 			}
 			m.Params = p.parseParams()
 			if p.peek().Kind == TokenColon {

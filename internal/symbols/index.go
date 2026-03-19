@@ -25,10 +25,19 @@ const (
 	KindNamespace
 )
 
+type SymbolSource int
+
+const (
+	SourceProject SymbolSource = iota
+	SourceBuiltin
+	SourceVendor
+)
+
 type Symbol struct {
 	Name       string
 	FQN        string
 	Kind       SymbolKind
+	Source     SymbolSource
 	URI        string
 	Range      protocol.Range
 	Visibility string
@@ -80,6 +89,10 @@ func NewIndex() *Index {
 }
 
 func (idx *Index) IndexFile(uri string, source string) {
+	idx.IndexFileWithSource(uri, source, SourceProject)
+}
+
+func (idx *Index) IndexFileWithSource(uri string, source string, src SymbolSource) {
 	file := parser.ParseFile(source)
 	if file == nil {
 		return
@@ -106,7 +119,7 @@ func (idx *Index) IndexFile(uri string, source string) {
 		if c.Extends != "" {
 			sym.Extends = resolve(c.Extends)
 		}
-		idx.addSymbol(uri, sym)
+		idx.addSymbolWithSource(uri, sym, src)
 		if c.Extends != "" {
 			idx.inheritanceMap[fqn] = sym.Extends
 		}
@@ -122,7 +135,7 @@ func (idx *Index) IndexFile(uri string, source string) {
 				DocComment: prop.DocComment, ParentFQN: fqn,
 				Range: protocol.Range{Start: protocol.Position{Line: prop.StartLine}}}
 			sym.Children = append(sym.Children, ps)
-			idx.addSymbol(uri, ps)
+			idx.addSymbolWithSource(uri, ps, src)
 		}
 		for _, m := range c.Methods {
 			ms := &Symbol{Name: m.Name, FQN: fqn + "::" + m.Name, Kind: KindMethod, URI: uri,
@@ -134,14 +147,14 @@ func (idx *Index) IndexFile(uri string, source string) {
 				ms.Params = append(ms.Params, ParamInfo{Name: p.Name, Type: resolve(p.Type.Name), DefaultValue: p.DefaultValue, IsVariadic: p.IsVariadic, IsReference: p.IsReference})
 			}
 			sym.Children = append(sym.Children, ms)
-			idx.addSymbol(uri, ms)
+			idx.addSymbolWithSource(uri, ms, src)
 		}
 		for _, co := range c.Constants {
 			cs := &Symbol{Name: co.Name, FQN: fqn + "::" + co.Name, Kind: KindConstant, URI: uri, ParentFQN: fqn,
 				Value: co.Value,
 				Range: protocol.Range{Start: protocol.Position{Line: co.StartLine}}}
 			sym.Children = append(sym.Children, cs)
-			idx.addSymbol(uri, cs)
+			idx.addSymbolWithSource(uri, cs, src)
 		}
 	}
 
@@ -149,7 +162,7 @@ func (idx *Index) IndexFile(uri string, source string) {
 		fqn := buildFQN(ns, iface.Name)
 		sym := &Symbol{Name: iface.Name, FQN: fqn, Kind: KindInterface, URI: uri, DocComment: iface.DocComment,
 			Range: protocol.Range{Start: protocol.Position{Line: iface.StartLine}}}
-		idx.addSymbol(uri, sym)
+		idx.addSymbolWithSource(uri, sym, src)
 		for _, m := range iface.Methods {
 			ms := &Symbol{Name: m.Name, FQN: fqn + "::" + m.Name, Kind: KindMethod, URI: uri,
 				Visibility: m.Visibility, ReturnType: resolve(m.ReturnType.Name), DocComment: m.DocComment, ParentFQN: fqn}
@@ -157,21 +170,21 @@ func (idx *Index) IndexFile(uri string, source string) {
 				ms.Params = append(ms.Params, ParamInfo{Name: p.Name, Type: resolve(p.Type.Name), IsVariadic: p.IsVariadic, IsReference: p.IsReference})
 			}
 			sym.Children = append(sym.Children, ms)
-			idx.addSymbol(uri, ms)
+			idx.addSymbolWithSource(uri, ms, src)
 		}
 	}
 
 	for _, tr := range file.Traits {
 		fqn := buildFQN(ns, tr.Name)
 		sym := &Symbol{Name: tr.Name, FQN: fqn, Kind: KindTrait, URI: uri, DocComment: tr.DocComment}
-		idx.addSymbol(uri, sym)
+		idx.addSymbolWithSource(uri, sym, src)
 		for _, prop := range tr.Properties {
 			ps := &Symbol{Name: prop.Name, FQN: fqn + "::" + prop.Name, Kind: KindProperty, URI: uri,
 				Visibility: prop.Visibility, IsStatic: prop.IsStatic, Type: resolve(prop.Type.Name),
 				DocComment: prop.DocComment, ParentFQN: fqn,
 				Range: protocol.Range{Start: protocol.Position{Line: prop.StartLine}}}
 			sym.Children = append(sym.Children, ps)
-			idx.addSymbol(uri, ps)
+			idx.addSymbolWithSource(uri, ps, src)
 		}
 		for _, m := range tr.Methods {
 			ms := &Symbol{Name: m.Name, FQN: fqn + "::" + m.Name, Kind: KindMethod, URI: uri,
@@ -182,7 +195,7 @@ func (idx *Index) IndexFile(uri string, source string) {
 				ms.Params = append(ms.Params, ParamInfo{Name: p.Name, Type: resolve(p.Type.Name), IsVariadic: p.IsVariadic, IsReference: p.IsReference})
 			}
 			sym.Children = append(sym.Children, ms)
-			idx.addSymbol(uri, ms)
+			idx.addSymbolWithSource(uri, ms, src)
 		}
 	}
 
@@ -194,14 +207,14 @@ func (idx *Index) IndexFile(uri string, source string) {
 		}
 		sym := &Symbol{Name: en.Name, FQN: fqn, Kind: KindEnum, URI: uri, DocComment: en.DocComment,
 			BackedType: en.BackedType, Implements: resolvedEnumImpls}
-		idx.addSymbol(uri, sym)
+		idx.addSymbolWithSource(uri, sym, src)
 		for _, impl := range resolvedEnumImpls {
 			idx.implementsMap[fqn] = append(idx.implementsMap[fqn], impl)
 		}
 		for _, ec := range en.Cases {
 			cs := &Symbol{Name: ec.Name, FQN: fqn + "::" + ec.Name, Kind: KindEnumCase, URI: uri, ParentFQN: fqn, Value: ec.Value}
 			sym.Children = append(sym.Children, cs)
-			idx.addSymbol(uri, cs)
+			idx.addSymbolWithSource(uri, cs, src)
 		}
 		for _, m := range en.Methods {
 			ms := &Symbol{Name: m.Name, FQN: fqn + "::" + m.Name, Kind: KindMethod, URI: uri,
@@ -212,7 +225,7 @@ func (idx *Index) IndexFile(uri string, source string) {
 				ms.Params = append(ms.Params, ParamInfo{Name: p.Name, Type: resolve(p.Type.Name), IsVariadic: p.IsVariadic, IsReference: p.IsReference})
 			}
 			sym.Children = append(sym.Children, ms)
-			idx.addSymbol(uri, ms)
+			idx.addSymbolWithSource(uri, ms, src)
 		}
 	}
 
@@ -223,7 +236,7 @@ func (idx *Index) IndexFile(uri string, source string) {
 		for _, p := range fn.Params {
 			sym.Params = append(sym.Params, ParamInfo{Name: p.Name, Type: resolve(p.Type.Name), IsVariadic: p.IsVariadic, IsReference: p.IsReference})
 		}
-		idx.addSymbol(uri, sym)
+		idx.addSymbolWithSource(uri, sym, src)
 	}
 }
 
@@ -231,6 +244,11 @@ func (idx *Index) addSymbol(uri string, sym *Symbol) {
 	idx.symbols[sym.FQN] = sym
 	idx.nameIndex[sym.Name] = appendUnique(idx.nameIndex[sym.Name], sym.FQN)
 	idx.fileSymbols[uri] = append(idx.fileSymbols[uri], sym)
+}
+
+func (idx *Index) addSymbolWithSource(uri string, sym *Symbol, src SymbolSource) {
+	sym.Source = src
+	idx.addSymbol(uri, sym)
 }
 
 func (idx *Index) removeFileSymbols(uri string) {
@@ -427,7 +445,7 @@ func (idx *Index) RegisterBuiltins() {
 	}
 
 	for _, fn := range builtins {
-		sym := &Symbol{Name: fn.Name, FQN: fn.Name, Kind: KindFunction, URI: "builtin", ReturnType: fn.Ret, DocComment: fn.Doc, Params: fn.Params}
+		sym := &Symbol{Name: fn.Name, FQN: fn.Name, Kind: KindFunction, Source: SourceBuiltin, URI: "builtin", ReturnType: fn.Ret, DocComment: fn.Doc, Params: fn.Params}
 		idx.symbols[sym.FQN] = sym
 		idx.nameIndex[sym.Name] = appendUnique(idx.nameIndex[sym.Name], sym.FQN)
 	}
@@ -444,7 +462,7 @@ func (idx *Index) RegisterBuiltins() {
 		{"ArrayObject", "Allows objects to work as arrays"},
 	}
 	for _, cls := range builtinClasses {
-		sym := &Symbol{Name: cls.Name, FQN: cls.Name, Kind: KindClass, URI: "builtin", DocComment: cls.Doc}
+		sym := &Symbol{Name: cls.Name, FQN: cls.Name, Kind: KindClass, Source: SourceBuiltin, URI: "builtin", DocComment: cls.Doc}
 		idx.symbols[sym.FQN] = sym
 		idx.nameIndex[sym.Name] = appendUnique(idx.nameIndex[sym.Name], sym.FQN)
 	}
@@ -545,4 +563,38 @@ func removeFromSlice(slice []string, item string) []string {
 func URIToPath(uri string) string {
 	path := strings.TrimPrefix(uri, "file://")
 	return filepath.Clean(path)
+}
+
+// PickBestStandalone selects the most appropriate symbol when multiple symbols
+// share the same short name and the word appears in standalone context (not
+// after -> or ::). Prefers functions over classes over constants over
+// methods/properties. Among equally-ranked kinds, prefers an exact case match.
+func PickBestStandalone(syms []*Symbol, word string) *Symbol {
+	var best *Symbol
+	bestRank := 999
+	bestExact := false
+
+	for _, s := range syms {
+		r := standaloneRank(s)
+		exact := s.Name == word
+		if r < bestRank || (r == bestRank && exact && !bestExact) {
+			best = s
+			bestRank = r
+			bestExact = exact
+		}
+	}
+	return best
+}
+
+func standaloneRank(s *Symbol) int {
+	switch s.Kind {
+	case KindFunction:
+		return 0
+	case KindClass, KindInterface, KindEnum, KindTrait:
+		return 1
+	case KindConstant, KindEnumCase:
+		return 2
+	default: // KindMethod, KindProperty
+		return 3
+	}
 }

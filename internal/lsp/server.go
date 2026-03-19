@@ -419,7 +419,7 @@ func (s *Server) indexWorkspace() {
 		if content, err := os.ReadFile(path); err == nil {
 			func() {
 				defer s.recoverPanic("indexWorkspace:" + path)
-				s.index.IndexFile("file://"+path, string(content))
+				s.index.IndexFileWithSource("file://"+path, string(content), symbols.SourceProject)
 				count++
 			}()
 		}
@@ -436,6 +436,24 @@ func (s *Server) indexComposerDependencies() {
 	}
 	vendorCount := 0
 	for _, entry := range entries {
+		src := symbols.SourceProject
+		if entry.IsVendor {
+			src = symbols.SourceVendor
+		}
+
+		if entry.IsFile {
+			if content, err := os.ReadFile(entry.Path); err == nil {
+				func() {
+					defer s.recoverPanic("indexFile:" + entry.Path)
+					s.index.IndexFileWithSource("file://"+entry.Path, string(content), src)
+					if entry.IsVendor {
+						vendorCount++
+					}
+				}()
+			}
+			continue
+		}
+
 		if !entry.IsVendor {
 			continue
 		}
@@ -453,7 +471,7 @@ func (s *Server) indexComposerDependencies() {
 			if content, err := os.ReadFile(path); err == nil {
 				func() {
 					defer s.recoverPanic("indexVendor:" + path)
-					s.index.IndexFile("file://"+path, string(content))
+					s.index.IndexFileWithSource("file://"+path, string(content), symbols.SourceVendor)
 					vendorCount++
 				}()
 			}

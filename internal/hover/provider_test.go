@@ -421,6 +421,79 @@ class Config {
 	}
 }
 
+func TestHoverStandaloneFunctionPreferredOverMethod(t *testing.T) {
+	idx := symbols.NewIndex()
+	// Index a class with a "request" method
+	idx.IndexFile("file:///class.php", `<?php
+namespace Illuminate\Http;
+class Request {
+    public function request(): mixed { return null; }
+}
+`)
+	// Index a global "request" function (like Laravel helpers)
+	idx.IndexFile("file:///helpers.php", `<?php
+/**
+ * Get an instance of the current request.
+ *
+ * @param string|null $key
+ * @return mixed
+ */
+function request(?string $key = null) { return null; }
+`)
+	ca := container.NewContainerAnalyzer(idx, "/tmp", "none")
+	p := NewProvider(idx, ca, "laravel")
+
+	// Hovering over standalone request() in a controller method body
+	source := `<?php
+namespace App\Http\Controllers;
+
+class UserController {
+    public function index() {
+        $name = request('name');
+    }
+}
+`
+	pos := charPosOf(t, source, "request", "request('name')")
+	hover := p.GetHover("file:///controller.php", source, pos)
+	if hover == nil {
+		t.Fatal("expected hover result for request()")
+	}
+	val := hover.Contents.Value
+	// Should show the global function, not the class method
+	if !strings.Contains(val, "**function**") {
+		t.Errorf("expected function kind (not method), got:\n%s", val)
+	}
+	if strings.Contains(val, "**method**") {
+		t.Errorf("should NOT show method hover for standalone request(), got:\n%s", val)
+	}
+}
+
+func TestHoverCaseSensitivePreference(t *testing.T) {
+	idx := symbols.NewIndex()
+	idx.IndexFile("file:///a.php", `<?php
+function Request(): object { return new \stdClass(); }
+`)
+	idx.IndexFile("file:///b.php", `<?php
+function request(): mixed { return null; }
+`)
+	ca := container.NewContainerAnalyzer(idx, "/tmp", "none")
+	p := NewProvider(idx, ca, "none")
+
+	source := `<?php
+request();
+`
+	pos := charPosOf(t, source, "request", "request()")
+	hover := p.GetHover("file:///test.php", source, pos)
+	if hover == nil {
+		t.Fatal("expected hover result")
+	}
+	val := hover.Contents.Value
+	// Should prefer the exact case match "request" over "Request"
+	if !strings.Contains(val, "`request`") {
+		t.Errorf("expected exact case match 'request', got:\n%s", val)
+	}
+}
+
 func TestHoverClassModifiers(t *testing.T) {
 	idx := symbols.NewIndex()
 	idx.IndexFile("file:///test.php", `<?php

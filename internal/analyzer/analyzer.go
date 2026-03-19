@@ -75,15 +75,15 @@ func (a *Analyzer) FindDefinition(uri, source string, pos protocol.Position) *pr
 		}
 	}
 
-	// Fallback: lookup by short name
+	// Fallback: lookup by short name — prefer standalone-appropriate symbols
+	// (functions/classes over methods/properties) since we have no access chain.
 	lookupName := word
 	if idx := strings.LastIndex(word, "\\"); idx >= 0 {
 		lookupName = word[idx+1:]
 	}
-	for _, sym := range a.index.LookupByName(lookupName) {
-		if sym.URI != "builtin" {
-			return symbolLocation(sym)
-		}
+	syms := a.index.LookupByName(lookupName)
+	if best := symbols.PickBestStandalone(syms, word); best != nil {
+		return symbolLocation(best)
 	}
 
 	return nil
@@ -387,24 +387,42 @@ func (a *Analyzer) GetDocumentSymbols(uri, source string) []protocol.DocumentSym
 	}
 	var ds []protocol.DocumentSymbol
 	for _, cls := range file.Classes {
+		if cls.Name == "" {
+			continue
+		}
 		s := protocol.DocumentSymbol{Name: cls.Name, Kind: protocol.SymbolKindClass,
 			Range: mkRange(cls.StartLine), SelectionRange: mkRange(cls.StartLine)}
 		for _, m := range cls.Methods {
+			if m.Name == "" {
+				continue
+			}
 			s.Children = append(s.Children, protocol.DocumentSymbol{Name: m.Name, Detail: m.Visibility, Kind: protocol.SymbolKindMethod, Range: mkRange(m.StartLine), SelectionRange: mkRange(m.StartLine)})
 		}
 		for _, p := range cls.Properties {
+			if p.Name == "" {
+				continue
+			}
 			s.Children = append(s.Children, protocol.DocumentSymbol{Name: p.Name, Detail: p.Type.Name, Kind: protocol.SymbolKindProperty, Range: mkRange(p.StartLine), SelectionRange: mkRange(p.StartLine)})
 		}
 		ds = append(ds, s)
 	}
 	for _, iface := range file.Interfaces {
+		if iface.Name == "" {
+			continue
+		}
 		s := protocol.DocumentSymbol{Name: iface.Name, Kind: protocol.SymbolKindInterface, Range: mkRange(iface.StartLine), SelectionRange: mkRange(iface.StartLine)}
 		ds = append(ds, s)
 	}
 	for _, en := range file.Enums {
+		if en.Name == "" {
+			continue
+		}
 		ds = append(ds, protocol.DocumentSymbol{Name: en.Name, Kind: protocol.SymbolKindEnum, Range: mkRange(en.StartLine), SelectionRange: mkRange(en.StartLine)})
 	}
 	for _, fn := range file.Functions {
+		if fn.Name == "" {
+			continue
+		}
 		ds = append(ds, protocol.DocumentSymbol{Name: fn.Name, Kind: protocol.SymbolKindFunction, Range: mkRange(fn.StartLine), SelectionRange: mkRange(fn.StartLine)})
 	}
 	return ds
@@ -424,7 +442,10 @@ func (a *Analyzer) GetSignatureHelp(uri, source string, pos protocol.Position) *
 	if len(syms) == 0 {
 		return nil
 	}
-	sym := syms[0]
+	sym := symbols.PickBestStandalone(syms, funcName)
+	if sym == nil {
+		return nil
+	}
 	sig := protocol.SignatureInformation{Label: sym.Name + formatParamLabel(sym)}
 	for _, p := range sym.Params {
 		l := ""

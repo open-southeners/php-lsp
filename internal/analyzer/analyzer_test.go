@@ -192,6 +192,43 @@ func TestDefinitionVendorMethod(t *testing.T) {
 	}
 }
 
+func TestDefinitionStandaloneFunctionOverMethod(t *testing.T) {
+	idx := symbols.NewIndex()
+	// Class with a "request" method
+	idx.IndexFile("file:///vendor/Request.php", `<?php
+namespace Illuminate\Http;
+class Request {
+    public function request(): mixed { return null; }
+}
+`)
+	// Global "request" function (Laravel helper)
+	idx.IndexFile("file:///vendor/helpers.php", `<?php
+function request(?string $key = null) { return null; }
+`)
+
+	ca := container.NewContainerAnalyzer(idx, "/tmp", "none")
+	a := NewAnalyzer(idx, ca)
+
+	source := `<?php
+namespace App\Http\Controllers;
+
+class UserController {
+    public function index() {
+        $name = request('name');
+    }
+}
+`
+	pos := charPosOf(t, source, "request", "request('name')")
+	loc := a.FindDefinition("file:///controller.php", source, pos)
+	if loc == nil {
+		t.Fatal("expected definition location for request()")
+	}
+	// Should go to the global function, not the class method
+	if !strings.Contains(loc.URI, "helpers.php") {
+		t.Errorf("expected URI to contain helpers.php (global function), got %s", loc.URI)
+	}
+}
+
 func TestDefinitionNoResult(t *testing.T) {
 	a, src := setupAnalyzer(t)
 	// "void" keyword — should return nil

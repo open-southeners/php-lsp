@@ -35,22 +35,26 @@ func (p *Provider) GetCompletions(uri, source string, pos protocol.Position) []p
 		return p.completeStaticAccess(prefix)
 	}
 	if strings.HasSuffix(trimmed, "|>") {
-		return p.completePipe()
+		currentNS := extractNamespace(source)
+		return p.completePipe(currentNS)
 	}
 	if strings.Contains(trimmed, "#[") && !strings.Contains(trimmed, "]") {
 		return p.completeAttribute()
 	}
 	words := strings.Fields(trimmed)
 	if len(words) >= 1 && (words[len(words)-1] == "new" || (len(words) >= 2 && words[len(words)-2] == "new")) {
-		return p.completeNew(prefix)
+		currentNS := extractNamespace(source)
+		return p.completeNew(prefix, currentNS)
 	}
 	if len(words) >= 1 && words[0] == "use" {
-		return p.completeUse(prefix)
+		currentNS := extractNamespace(source)
+		return p.completeUse(prefix, currentNS)
 	}
 	if strings.Contains(trimmed, "app(") || strings.Contains(trimmed, "$container->get(") {
 		return p.completeContainerResolve()
 	}
-	return p.completeGlobal(prefix)
+	currentNS := extractNamespace(source)
+	return p.completeGlobal(prefix, currentNS)
 }
 
 func (p *Provider) completeMemberAccess(uri, source string, pos protocol.Position, prefix string) []protocol.CompletionItem {
@@ -107,7 +111,7 @@ func (p *Provider) completeStaticAccess(prefix string) []protocol.CompletionItem
 	return items
 }
 
-func (p *Provider) completeNew(prefix string) []protocol.CompletionItem {
+func (p *Provider) completeNew(prefix, currentNS string) []protocol.CompletionItem {
 	var items []protocol.CompletionItem
 	words := strings.Fields(prefix)
 	search := ""
@@ -121,12 +125,12 @@ func (p *Provider) completeNew(prefix string) []protocol.CompletionItem {
 		if sym.Kind != symbols.KindClass {
 			continue
 		}
-		items = append(items, protocol.CompletionItem{Label: sym.Name, Kind: protocol.CompletionItemKindClass, Detail: sym.FQN, InsertText: sym.Name + "($0)", InsertTextFormat: 2})
+		items = append(items, protocol.CompletionItem{Label: sym.Name, Kind: protocol.CompletionItemKindClass, Detail: sym.FQN, InsertText: sym.Name + "($0)", InsertTextFormat: 2, SortText: sortPriority(sym, currentNS)})
 	}
 	return items
 }
 
-func (p *Provider) completeUse(prefix string) []protocol.CompletionItem {
+func (p *Provider) completeUse(prefix, currentNS string) []protocol.CompletionItem {
 	var items []protocol.CompletionItem
 	parts := strings.Fields(prefix)
 	ns := ""
@@ -137,16 +141,16 @@ func (p *Provider) completeUse(prefix string) []protocol.CompletionItem {
 		if sym.Kind == symbols.KindMethod || sym.Kind == symbols.KindProperty {
 			continue
 		}
-		items = append(items, protocol.CompletionItem{Label: sym.FQN, Kind: symKind(sym.Kind), Detail: sym.Name})
+		items = append(items, protocol.CompletionItem{Label: sym.FQN, Kind: symKind(sym.Kind), Detail: sym.Name, SortText: sortPriority(sym, currentNS)})
 	}
 	return items
 }
 
-func (p *Provider) completePipe() []protocol.CompletionItem {
+func (p *Provider) completePipe(currentNS string) []protocol.CompletionItem {
 	var items []protocol.CompletionItem
 	for _, sym := range p.index.SearchByPrefix("") {
 		if sym.Kind == symbols.KindFunction && len(sym.Params) > 0 {
-			items = append(items, protocol.CompletionItem{Label: sym.Name, Kind: protocol.CompletionItemKindFunction, Detail: fmtSig(sym)})
+			items = append(items, protocol.CompletionItem{Label: sym.Name, Kind: protocol.CompletionItemKindFunction, Detail: fmtSig(sym), SortText: sortPriority(sym, currentNS)})
 		}
 	}
 	return items
@@ -178,7 +182,7 @@ func (p *Provider) completeContainerResolve() []protocol.CompletionItem {
 	return items
 }
 
-func (p *Provider) completeGlobal(prefix string) []protocol.CompletionItem {
+func (p *Provider) completeGlobal(prefix, currentNS string) []protocol.CompletionItem {
 	var items []protocol.CompletionItem
 	words := strings.Fields(strings.TrimSpace(prefix))
 	search := ""
@@ -187,28 +191,21 @@ func (p *Provider) completeGlobal(prefix string) []protocol.CompletionItem {
 	}
 	for _, kw := range []string{"abstract", "class", "const", "enum", "extends", "final", "fn", "for", "foreach", "function", "if", "implements", "interface", "match", "namespace", "new", "private", "protected", "public", "readonly", "return", "static", "switch", "throw", "trait", "try", "use", "while", "yield"} {
 		if search == "" || strings.HasPrefix(kw, strings.ToLower(search)) {
-			items = append(items, protocol.CompletionItem{Label: kw, Kind: protocol.CompletionItemKindKeyword, SortText: "2" + kw})
+			items = append(items, protocol.CompletionItem{Label: kw, Kind: protocol.CompletionItemKindKeyword, SortText: "5" + kw})
 		}
 	}
 	if search != "" {
 		for _, sym := range p.index.SearchByPrefix(search) {
-			item := protocol.CompletionItem{Label: sym.Name, Kind: symKind(sym.Kind), Detail: sym.FQN}
+			// Methods and properties only make sense after -> or ::
+			if sym.Kind == symbols.KindMethod || sym.Kind == symbols.KindProperty {
+				continue
+			}
+			item := protocol.CompletionItem{Label: sym.Name, Kind: symKind(sym.Kind), Detail: sym.FQN, SortText: sortPriority(sym, currentNS)}
 			if sym.Kind == symbols.KindFunction {
 				item.InsertText = sym.Name + "($0)"
 				item.InsertTextFormat = 2
 			}
 			items = append(items, item)
-		}
-	}
-	if p.framework == "laravel" {
-		for _, h := range [][3]string{
-			{"app", "Resolve from container", "app($0)"}, {"config", "Get/set config", "config('$0')"}, {"env", "Get env var", "env('$0')"},
-			{"route", "URL for route", "route('$0')"}, {"view", "Create view", "view('$0')"}, {"redirect", "Redirect", "redirect('$0')"},
-			{"collect", "Create collection", "collect($0)"}, {"dd", "Dump and die", "dd($0)"}, {"now", "Current time", "now()"},
-		} {
-			if search == "" || strings.HasPrefix(h[0], strings.ToLower(search)) {
-				items = append(items, protocol.CompletionItem{Label: h[0], Kind: protocol.CompletionItemKindFunction, Detail: h[1], InsertText: h[2], InsertTextFormat: 2, SortText: "0" + h[0]})
-			}
 		}
 	}
 	return items
@@ -241,6 +238,35 @@ func (p *Provider) resolveVariableType(source, varName string) string {
 					return param.Type.Name
 				}
 			}
+		}
+	}
+	return ""
+}
+
+func sortPriority(sym *symbols.Symbol, currentNS string) string {
+	switch sym.Source {
+	case symbols.SourceProject:
+		if currentNS != "" && strings.HasPrefix(sym.FQN, currentNS+"\\") {
+			return "1" + sym.Name
+		}
+		return "2" + sym.Name
+	case symbols.SourceBuiltin:
+		return "3" + sym.Name
+	case symbols.SourceVendor:
+		return "4" + sym.Name
+	default:
+		return "2" + sym.Name
+	}
+}
+
+func extractNamespace(source string) string {
+	for _, line := range strings.Split(source, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "namespace ") {
+			ns := strings.TrimPrefix(trimmed, "namespace ")
+			ns = strings.TrimSuffix(ns, ";")
+			ns = strings.TrimSuffix(ns, " {")
+			return strings.TrimSpace(ns)
 		}
 	}
 	return ""

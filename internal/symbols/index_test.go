@@ -242,3 +242,86 @@ class Baz {
 		t.Fatal("Baz::qux should exist after reindex")
 	}
 }
+
+func TestIndexSourcePropagation(t *testing.T) {
+	idx := NewIndex()
+	idx.RegisterBuiltins()
+
+	idx.IndexFileWithSource("file:///project.php", `<?php
+namespace App;
+class Service {
+    public function run(): void {}
+}
+function helper(): string { return ""; }
+`, SourceProject)
+
+	idx.IndexFileWithSource("file:///vendor.php", `<?php
+namespace Vendor;
+class Logger {
+    public function info(): void {}
+}
+`, SourceVendor)
+
+	t.Run("project class source", func(t *testing.T) {
+		sym := idx.Lookup("App\\Service")
+		if sym == nil {
+			t.Fatal("expected App\\Service")
+		}
+		if sym.Source != SourceProject {
+			t.Errorf("expected SourceProject, got %d", sym.Source)
+		}
+	})
+
+	t.Run("project method inherits source", func(t *testing.T) {
+		sym := idx.Lookup("App\\Service::run")
+		if sym == nil {
+			t.Fatal("expected App\\Service::run")
+		}
+		if sym.Source != SourceProject {
+			t.Errorf("expected SourceProject, got %d", sym.Source)
+		}
+	})
+
+	t.Run("project function source", func(t *testing.T) {
+		sym := idx.Lookup("App\\helper")
+		if sym == nil {
+			t.Fatal("expected App\\helper")
+		}
+		if sym.Source != SourceProject {
+			t.Errorf("expected SourceProject, got %d", sym.Source)
+		}
+	})
+
+	t.Run("vendor class source", func(t *testing.T) {
+		sym := idx.Lookup("Vendor\\Logger")
+		if sym == nil {
+			t.Fatal("expected Vendor\\Logger")
+		}
+		if sym.Source != SourceVendor {
+			t.Errorf("expected SourceVendor, got %d", sym.Source)
+		}
+	})
+
+	t.Run("builtin source", func(t *testing.T) {
+		sym := idx.Lookup("strlen")
+		if sym == nil {
+			t.Fatal("expected strlen builtin")
+		}
+		if sym.Source != SourceBuiltin {
+			t.Errorf("expected SourceBuiltin, got %d", sym.Source)
+		}
+	})
+
+	t.Run("IndexFile defaults to SourceProject", func(t *testing.T) {
+		idx.IndexFile("file:///default.php", `<?php
+class DefaultClass {}
+`)
+		sym := idx.Lookup("DefaultClass")
+		if sym == nil {
+			t.Fatal("expected DefaultClass")
+		}
+		if sym.Source != SourceProject {
+			t.Errorf("expected SourceProject (default), got %d", sym.Source)
+		}
+	})
+}

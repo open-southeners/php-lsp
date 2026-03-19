@@ -331,3 +331,38 @@ func TestParseDocBlockEmptyDeprecated(t *testing.T) {
 		t.Errorf("expected empty deprecated msg, got: %q", doc.DeprecatedMsg)
 	}
 }
+
+func TestParseReservedWordMethodNames(t *testing.T) {
+	source := `<?php
+namespace App;
+
+class Foo {
+    public function class(): string { return ''; }
+    public function match(): bool { return true; }
+    public function new(): self { return new self(); }
+    public function return(): void {}
+    public function normal(): int { return 0; }
+}
+`
+	result := New().Parse(source)
+	if result == nil {
+		t.Fatal("expected non-nil result")
+	}
+	if len(result.Classes) != 1 {
+		t.Fatalf("expected 1 class, got %d", len(result.Classes))
+	}
+	cls := result.Classes[0]
+	if len(cls.Methods) != 5 {
+		t.Fatalf("expected 5 methods, got %d", len(cls.Methods))
+	}
+	expected := []string{"class", "match", "new", "return", "normal"}
+	for i, name := range expected {
+		if cls.Methods[i].Name != name {
+			t.Errorf("method %d: expected %q, got %q", i, name, cls.Methods[i].Name)
+		}
+	}
+	// No methods should leak as top-level functions
+	if len(result.Functions) != 0 {
+		t.Errorf("expected 0 top-level functions, got %d", len(result.Functions))
+	}
+}

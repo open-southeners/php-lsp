@@ -124,7 +124,15 @@ func (p *Provider) GetHover(uri, source string, pos protocol.Position) *protocol
 	if len(syms) == 0 {
 		return nil
 	}
-	content := p.formatHover(syms[0])
+
+	// We're in standalone context (no -> or :: before the word).
+	// Rank candidates: prefer functions/classes/enums/interfaces over methods/properties,
+	// and prefer exact case matches over case-insensitive ones.
+	best := symbols.PickBestStandalone(syms, word)
+	if best == nil {
+		return nil
+	}
+	content := p.formatHover(best)
 	if content == "" {
 		return nil
 	}

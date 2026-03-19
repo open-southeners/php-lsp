@@ -7,11 +7,12 @@ import (
 	"strings"
 )
 
-// AutoloadEntry represents a single PSR-4 namespace-to-directory mapping.
+// AutoloadEntry represents a single autoload entry (PSR-4 directory or file).
 type AutoloadEntry struct {
 	Namespace string
-	Path      string // Absolute path to the directory
+	Path      string // Absolute path to the directory or file
 	IsVendor  bool
+	IsFile    bool
 }
 
 type composerJSON struct {
@@ -20,7 +21,8 @@ type composerJSON struct {
 }
 
 type autoloadBlock struct {
-	PSR4 map[string]interface{} `json:"psr-4"`
+	PSR4  map[string]interface{} `json:"psr-4"`
+	Files []string               `json:"files"`
 }
 
 type installedJSON struct {
@@ -46,6 +48,8 @@ func GetAutoloadPaths(rootPath string) []AutoloadEntry {
 		if json.Unmarshal(data, &cj) == nil {
 			entries = append(entries, parsePSR4(cj.Autoload.PSR4, rootPath, false)...)
 			entries = append(entries, parsePSR4(cj.AutoloadDev.PSR4, rootPath, false)...)
+			entries = append(entries, parseFiles(cj.Autoload.Files, rootPath, false)...)
+			entries = append(entries, parseFiles(cj.AutoloadDev.Files, rootPath, false)...)
 		}
 	}
 
@@ -68,15 +72,29 @@ func GetAutoloadPaths(rootPath string) []AutoloadEntry {
 	}
 
 	for _, pkg := range packages {
-		if len(pkg.Autoload.PSR4) == 0 {
-			continue
-		}
 		// install-path is relative to vendor/composer/
 		pkgDir := filepath.Join(composerDir, pkg.InstallPath)
 		pkgDir = filepath.Clean(pkgDir)
-		entries = append(entries, parsePSR4(pkg.Autoload.PSR4, pkgDir, true)...)
+		if len(pkg.Autoload.PSR4) > 0 {
+			entries = append(entries, parsePSR4(pkg.Autoload.PSR4, pkgDir, true)...)
+		}
+		if len(pkg.Autoload.Files) > 0 {
+			entries = append(entries, parseFiles(pkg.Autoload.Files, pkgDir, true)...)
+		}
 	}
 
+	return entries
+}
+
+func parseFiles(files []string, basePath string, isVendor bool) []AutoloadEntry {
+	var entries []AutoloadEntry
+	for _, f := range files {
+		entries = append(entries, AutoloadEntry{
+			Path:     filepath.Join(basePath, f),
+			IsVendor: isVendor,
+			IsFile:   true,
+		})
+	}
 	return entries
 }
 
