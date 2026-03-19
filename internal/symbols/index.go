@@ -33,12 +33,19 @@ type Symbol struct {
 	Range      protocol.Range
 	Visibility string
 	IsStatic   bool
+	IsAbstract bool
+	IsFinal    bool
+	IsReadonly bool
 	Type       string
 	DocComment string
 	ParentFQN  string
 	Params     []ParamInfo
 	ReturnType string
 	Children   []*Symbol
+	Implements []string
+	Extends    string
+	BackedType string
+	Value      string
 }
 
 type ParamInfo struct {
@@ -88,14 +95,23 @@ func (idx *Index) IndexFile(uri string, source string) {
 
 	for _, c := range file.Classes {
 		fqn := buildFQN(ns, c.Name)
+		var resolvedImpls []string
+		for _, impl := range c.Implements {
+			resolvedImpls = append(resolvedImpls, resolve(impl))
+		}
 		sym := &Symbol{Name: c.Name, FQN: fqn, Kind: KindClass, URI: uri, DocComment: c.DocComment,
+			IsAbstract: c.IsAbstract, IsFinal: c.IsFinal, IsReadonly: c.IsReadonly,
+			Implements: resolvedImpls,
 			Range: protocol.Range{Start: protocol.Position{Line: c.StartLine, Character: c.StartCol}}}
+		if c.Extends != "" {
+			sym.Extends = resolve(c.Extends)
+		}
 		idx.addSymbol(uri, sym)
 		if c.Extends != "" {
-			idx.inheritanceMap[fqn] = resolve(c.Extends)
+			idx.inheritanceMap[fqn] = sym.Extends
 		}
-		for _, impl := range c.Implements {
-			idx.implementsMap[fqn] = append(idx.implementsMap[fqn], resolve(impl))
+		for _, impl := range resolvedImpls {
+			idx.implementsMap[fqn] = append(idx.implementsMap[fqn], impl)
 		}
 		for _, tr := range c.Traits {
 			idx.traitMap[fqn] = append(idx.traitMap[fqn], resolve(tr))
@@ -110,17 +126,19 @@ func (idx *Index) IndexFile(uri string, source string) {
 		}
 		for _, m := range c.Methods {
 			ms := &Symbol{Name: m.Name, FQN: fqn + "::" + m.Name, Kind: KindMethod, URI: uri,
-				Visibility: m.Visibility, IsStatic: m.IsStatic, ReturnType: resolve(m.ReturnType.Name),
+				Visibility: m.Visibility, IsStatic: m.IsStatic, IsAbstract: m.IsAbstract, IsFinal: m.IsFinal,
+				ReturnType: resolve(m.ReturnType.Name),
 				DocComment: m.DocComment, ParentFQN: fqn,
 				Range: protocol.Range{Start: protocol.Position{Line: m.StartLine}}}
 			for _, p := range m.Params {
-				ms.Params = append(ms.Params, ParamInfo{Name: p.Name, Type: resolve(p.Type.Name), IsVariadic: p.IsVariadic, IsReference: p.IsReference})
+				ms.Params = append(ms.Params, ParamInfo{Name: p.Name, Type: resolve(p.Type.Name), DefaultValue: p.DefaultValue, IsVariadic: p.IsVariadic, IsReference: p.IsReference})
 			}
 			sym.Children = append(sym.Children, ms)
 			idx.addSymbol(uri, ms)
 		}
 		for _, co := range c.Constants {
 			cs := &Symbol{Name: co.Name, FQN: fqn + "::" + co.Name, Kind: KindConstant, URI: uri, ParentFQN: fqn,
+				Value: co.Value,
 				Range: protocol.Range{Start: protocol.Position{Line: co.StartLine}}}
 			sym.Children = append(sym.Children, cs)
 			idx.addSymbol(uri, cs)
@@ -170,10 +188,18 @@ func (idx *Index) IndexFile(uri string, source string) {
 
 	for _, en := range file.Enums {
 		fqn := buildFQN(ns, en.Name)
-		sym := &Symbol{Name: en.Name, FQN: fqn, Kind: KindEnum, URI: uri, DocComment: en.DocComment}
+		var resolvedEnumImpls []string
+		for _, impl := range en.Implements {
+			resolvedEnumImpls = append(resolvedEnumImpls, resolve(impl))
+		}
+		sym := &Symbol{Name: en.Name, FQN: fqn, Kind: KindEnum, URI: uri, DocComment: en.DocComment,
+			BackedType: en.BackedType, Implements: resolvedEnumImpls}
 		idx.addSymbol(uri, sym)
+		for _, impl := range resolvedEnumImpls {
+			idx.implementsMap[fqn] = append(idx.implementsMap[fqn], impl)
+		}
 		for _, ec := range en.Cases {
-			cs := &Symbol{Name: ec.Name, FQN: fqn + "::" + ec.Name, Kind: KindEnumCase, URI: uri, ParentFQN: fqn}
+			cs := &Symbol{Name: ec.Name, FQN: fqn + "::" + ec.Name, Kind: KindEnumCase, URI: uri, ParentFQN: fqn, Value: ec.Value}
 			sym.Children = append(sym.Children, cs)
 			idx.addSymbol(uri, cs)
 		}
@@ -319,6 +345,12 @@ func (idx *Index) GetImplementors(ifaceFQN string) []*Symbol {
 		}
 	}
 	return results
+}
+
+func (idx *Index) GetImplementedInterfaces(classFQN string) []string {
+	idx.mu.RLock()
+	defer idx.mu.RUnlock()
+	return idx.implementsMap[classFQN]
 }
 
 func (idx *Index) GetNamespaceMembers(ns string) []*Symbol {

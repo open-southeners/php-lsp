@@ -39,6 +39,32 @@ func (p *Provider) GetHover(uri, source string, pos protocol.Position) *protocol
 		return p.hoverVariable(file, source, pos, word)
 	}
 
+	// Handle self/static/parent keywords — resolve to enclosing class
+	if word == "self" || word == "static" || word == "parent" {
+		if file != nil {
+			var classFQN string
+			if word == "parent" {
+				enclosing := p.findEnclosingClass(file, pos)
+				if enclosing != "" {
+					chain := p.index.GetInheritanceChain(enclosing)
+					if len(chain) > 0 {
+						classFQN = chain[0]
+					}
+				}
+			} else {
+				classFQN = p.findEnclosingClass(file, pos)
+			}
+			if classFQN != "" {
+				if sym := p.index.Lookup(classFQN); sym != nil {
+					content := p.formatHover(sym)
+					if content != "" {
+						return &protocol.Hover{Contents: protocol.MarkupContent{Kind: "markdown", Value: content}}
+					}
+				}
+			}
+		}
+	}
+
 	// Find the start position of the word on the line
 	wordStart := pos.Character
 	for wordStart > 0 && isWordChar(line[wordStart-1]) {
@@ -385,21 +411,18 @@ func (p *Provider) hoverVariable(file *parser.FileNode, source string, pos proto
 	// Try to resolve the variable type
 	typeName := p.resolveVariableType(varName, file, source, pos)
 	if typeName != "" {
-		var content string
+		var sb strings.Builder
+		sb.WriteString(fmt.Sprintf("**variable** `%s`\n\n", varName))
+		sb.WriteString(fmt.Sprintf("```php\n%s %s\n```\n", typeName, varName))
 		if sym := p.index.Lookup(typeName); sym != nil {
-			content = fmt.Sprintf("```php\n%s %s\n```\n", typeName, varName)
 			if sym.DocComment != "" {
 				if doc := parser.ParseDocBlock(sym.DocComment); doc != nil && doc.Summary != "" {
-					content += "\n" + doc.Summary + "\n"
+					sb.WriteString("\n" + doc.Summary + "\n")
 				}
 			}
-		} else {
-			content = fmt.Sprintf("```php\n%s %s\n```", typeName, varName)
 		}
-		if binding := p.container.ResolveDependency(typeName); binding != nil {
-			content += fmt.Sprintf("\n\n---\n**Container Binding**\n- Concrete: `%s`\n- Singleton: %v", binding.Concrete, binding.Singleton)
-		}
-		return &protocol.Hover{Contents: protocol.MarkupContent{Kind: "markdown", Value: content}}
+		p.appendContainerBinding(&sb, typeName)
+		return &protocol.Hover{Contents: protocol.MarkupContent{Kind: "markdown", Value: sb.String()}}
 	}
 
 	// Fallback: search all method params in file
@@ -411,11 +434,11 @@ func (p *Provider) hoverVariable(file *parser.FileNode, source string, pos proto
 					if t == "" {
 						t = "mixed"
 					}
-					content := fmt.Sprintf("```php\n%s %s\n```", t, varName)
-					if binding := p.container.ResolveDependency(t); binding != nil {
-						content += fmt.Sprintf("\n\n---\n**Container Binding**\n- Concrete: `%s`\n- Singleton: %v", binding.Concrete, binding.Singleton)
-					}
-					return &protocol.Hover{Contents: protocol.MarkupContent{Kind: "markdown", Value: content}}
+					var sb strings.Builder
+					sb.WriteString(fmt.Sprintf("**parameter** `%s`\n\n", varName))
+					sb.WriteString(fmt.Sprintf("```php\n%s %s\n```\n", t, varName))
+					p.appendContainerBinding(&sb, t)
+					return &protocol.Hover{Contents: protocol.MarkupContent{Kind: "markdown", Value: sb.String()}}
 				}
 			}
 		}
@@ -425,56 +448,85 @@ func (p *Provider) hoverVariable(file *parser.FileNode, source string, pos proto
 
 func (p *Provider) formatHover(sym *symbols.Symbol) string {
 	var sb strings.Builder
+
+	// === Header: kind label + FQN ===
 	switch sym.Kind {
 	case symbols.KindClass:
-		sb.WriteString(fmt.Sprintf("```php\nclass %s", sym.FQN))
-		if chain := p.index.GetInheritanceChain(sym.FQN); len(chain) > 0 {
-			sb.WriteString(fmt.Sprintf(" extends %s", chain[0]))
+		sb.WriteString(fmt.Sprintf("**class** `%s`\n\n", sym.FQN))
+		// Declaration with modifiers
+		sb.WriteString("```php\n")
+		if sym.IsFinal {
+			sb.WriteString("final ")
+		}
+		if sym.IsAbstract {
+			sb.WriteString("abstract ")
+		}
+		if sym.IsReadonly {
+			sb.WriteString("readonly ")
+		}
+		sb.WriteString("class " + sym.Name)
+		if sym.Extends != "" {
+			sb.WriteString(" extends " + sym.Extends)
+		}
+		if len(sym.Implements) > 0 {
+			sb.WriteString(" implements " + strings.Join(sym.Implements, ", "))
 		}
 		sb.WriteString("\n```\n")
+		// Implemented by (for classes that act as base)
 		if impls := p.index.GetImplementors(sym.FQN); len(impls) > 0 {
 			sb.WriteString("\n**Implemented by:**\n")
 			for _, impl := range impls {
 				sb.WriteString(fmt.Sprintf("- `%s`\n", impl.FQN))
 			}
 		}
+
 	case symbols.KindInterface:
-		sb.WriteString(fmt.Sprintf("```php\ninterface %s\n```\n", sym.FQN))
+		sb.WriteString(fmt.Sprintf("**interface** `%s`\n\n", sym.FQN))
+		sb.WriteString(fmt.Sprintf("```php\ninterface %s\n```\n", sym.Name))
 		if impls := p.index.GetImplementors(sym.FQN); len(impls) > 0 {
 			sb.WriteString("\n**Implementations:**\n")
 			for _, impl := range impls {
 				sb.WriteString(fmt.Sprintf("- `%s`\n", impl.FQN))
 			}
 		}
-		if binding := p.container.ResolveDependency(sym.FQN); binding != nil {
-			sb.WriteString(fmt.Sprintf("\n**Container -> `%s`**", binding.Concrete))
-			if binding.Singleton {
-				sb.WriteString(" (singleton)")
-			}
-		}
+
 	case symbols.KindMethod:
+		sb.WriteString(fmt.Sprintf("**method** `%s`\n\n", sym.FQN))
+		sb.WriteString("```php\n")
 		vis := sym.Visibility
 		if vis == "" {
 			vis = "public"
 		}
-		if sym.IsStatic {
-			vis += " static"
+		if sym.IsAbstract {
+			sb.WriteString("abstract ")
 		}
-		sb.WriteString(fmt.Sprintf("```php\n%s function %s%s", vis, sym.Name, fmtParams(sym.Params)))
+		if sym.IsFinal {
+			sb.WriteString("final ")
+		}
+		sb.WriteString(vis)
+		if sym.IsStatic {
+			sb.WriteString(" static")
+		}
+		sb.WriteString(fmt.Sprintf(" function %s%s", sym.Name, fmtParams(sym.Params)))
 		if sym.ReturnType != "" {
 			sb.WriteString(": " + sym.ReturnType)
 		}
 		sb.WriteString("\n```\n")
+		// Override/implements detection
 		if sym.ParentFQN != "" {
-			sb.WriteString(fmt.Sprintf("\nDefined in `%s`\n", sym.ParentFQN))
+			p.appendMethodOrigin(&sb, sym)
 		}
+
 	case symbols.KindFunction:
+		sb.WriteString(fmt.Sprintf("**function** `%s`\n\n", sym.FQN))
 		sb.WriteString(fmt.Sprintf("```php\nfunction %s%s", sym.Name, fmtParams(sym.Params)))
 		if sym.ReturnType != "" {
 			sb.WriteString(": " + sym.ReturnType)
 		}
 		sb.WriteString("\n```\n")
+
 	case symbols.KindProperty:
+		sb.WriteString(fmt.Sprintf("**property** `%s`\n\n", sym.FQN))
 		vis := sym.Visibility
 		if vis == "" {
 			vis = "public"
@@ -487,48 +539,206 @@ func (p *Provider) formatHover(sym *symbols.Symbol) string {
 		if !strings.HasPrefix(propName, "$") {
 			propName = "$" + propName
 		}
-		sb.WriteString(fmt.Sprintf("```php\n%s %s %s\n```\n", vis, t, propName))
+		sb.WriteString(fmt.Sprintf("```php\n%s", vis))
+		if sym.IsStatic {
+			sb.WriteString(" static")
+		}
+		sb.WriteString(fmt.Sprintf(" %s %s\n```\n", t, propName))
 		if sym.ParentFQN != "" {
 			sb.WriteString(fmt.Sprintf("\nDefined in `%s`\n", sym.ParentFQN))
 		}
+
 	case symbols.KindEnum:
-		sb.WriteString(fmt.Sprintf("```php\nenum %s\n```\n", sym.FQN))
+		sb.WriteString(fmt.Sprintf("**enum** `%s`\n\n", sym.FQN))
+		sb.WriteString("```php\nenum " + sym.Name)
+		if sym.BackedType != "" {
+			sb.WriteString(": " + sym.BackedType)
+		}
+		if len(sym.Implements) > 0 {
+			sb.WriteString(" implements " + strings.Join(sym.Implements, ", "))
+		}
+		sb.WriteString("\n```\n")
+
 	case symbols.KindEnumCase:
-		sb.WriteString(fmt.Sprintf("```php\ncase %s\n```\n", sym.Name))
+		sb.WriteString(fmt.Sprintf("**case** `%s`\n\n", sym.FQN))
+		sb.WriteString("```php\ncase " + sym.Name)
+		if sym.Value != "" {
+			sb.WriteString(" = " + sym.Value)
+		}
+		sb.WriteString("\n```\n")
 		if sym.ParentFQN != "" {
 			sb.WriteString(fmt.Sprintf("\nDefined in `%s`\n", sym.ParentFQN))
 		}
+
 	case symbols.KindConstant:
-		sb.WriteString(fmt.Sprintf("```php\nconst %s\n```\n", sym.Name))
+		sb.WriteString(fmt.Sprintf("**constant** `%s`\n\n", sym.FQN))
+		sb.WriteString("```php\nconst " + sym.Name)
+		if sym.Value != "" {
+			sb.WriteString(" = " + sym.Value)
+		}
+		sb.WriteString("\n```\n")
 		if sym.ParentFQN != "" {
 			sb.WriteString(fmt.Sprintf("\nDefined in `%s`\n", sym.ParentFQN))
 		}
+
 	case symbols.KindTrait:
-		sb.WriteString(fmt.Sprintf("```php\ntrait %s\n```\n", sym.FQN))
+		sb.WriteString(fmt.Sprintf("**trait** `%s`\n\n", sym.FQN))
+		sb.WriteString(fmt.Sprintf("```php\ntrait %s\n```\n", sym.Name))
 	}
+
+	// === DocBlock section ===
+	doc := p.getEffectiveDocBlock(sym)
+	if doc != nil {
+		if doc.Summary != "" {
+			sb.WriteString("\n" + doc.Summary + "\n")
+		}
+		if doc.Deprecated {
+			msg := doc.DeprecatedMsg
+			if msg == "" {
+				msg = "This symbol is deprecated."
+			}
+			sb.WriteString(fmt.Sprintf("\n**⚠ Deprecated:** %s\n", msg))
+		}
+		if len(doc.Params) > 0 {
+			sb.WriteString("\n**Params**\n")
+			for _, param := range doc.Params {
+				line := "- "
+				if param.Name != "" {
+					line += "`" + param.Name + "` "
+				}
+				if param.Type != "" {
+					line += "`" + param.Type + "`"
+				}
+				if param.Description != "" {
+					line += " — " + param.Description
+				}
+				sb.WriteString(line + "\n")
+			}
+		}
+		if doc.Return.Type != "" {
+			ret := fmt.Sprintf("\n**Returns** `%s`", doc.Return.Type)
+			if doc.Return.Description != "" {
+				ret += " — " + doc.Return.Description
+			}
+			sb.WriteString(ret + "\n")
+		}
+		if len(doc.Throws) > 0 {
+			sb.WriteString("\n**Throws**\n")
+			for _, th := range doc.Throws {
+				line := "- `" + th.Type + "`"
+				if th.Description != "" {
+					line += " — " + th.Description
+				}
+				sb.WriteString(line + "\n")
+			}
+		}
+		// Show @template, @mixin, @see, @property-* from tags
+		for _, tagName := range []string{"template", "mixin", "see", "property", "property-read", "property-write", "method"} {
+			if vals, ok := doc.Tags[tagName]; ok && len(vals) > 0 {
+				label := "@" + tagName
+				for _, v := range vals {
+					sb.WriteString(fmt.Sprintf("\n`%s %s`\n", label, v))
+				}
+			}
+		}
+	}
+
+	// === Container binding (interface/class) ===
+	switch sym.Kind {
+	case symbols.KindInterface, symbols.KindClass:
+		p.appendContainerBinding(&sb, sym.FQN)
+	}
+
+	// === PHP Manual link ===
+	if url := phpManualURL(sym); url != "" {
+		sb.WriteString(fmt.Sprintf("\n[PHP Manual](%s)\n", url))
+	}
+
+	return sb.String()
+}
+
+// appendContainerBinding adds container binding info if available.
+func (p *Provider) appendContainerBinding(sb *strings.Builder, fqn string) {
+	if binding := p.container.ResolveDependency(fqn); binding != nil {
+		sb.WriteString(fmt.Sprintf("\n---\n**Container Binding**\n- Concrete: `%s`\n- Singleton: %v\n", binding.Concrete, binding.Singleton))
+	}
+}
+
+// appendMethodOrigin detects if a method overrides a parent method or implements an interface method.
+func (p *Provider) appendMethodOrigin(sb *strings.Builder, sym *symbols.Symbol) {
+	// Check interfaces
+	ifaces := p.index.GetImplementedInterfaces(sym.ParentFQN)
+	for _, ifaceFQN := range ifaces {
+		ifaceSym := p.index.Lookup(ifaceFQN)
+		if ifaceSym == nil {
+			continue
+		}
+		for _, child := range ifaceSym.Children {
+			if child.Kind == symbols.KindMethod && child.Name == sym.Name {
+				sb.WriteString(fmt.Sprintf("\nImplements `%s::%s`\n", ifaceFQN, sym.Name))
+				return
+			}
+		}
+	}
+	// Check parent chain
+	chain := p.index.GetInheritanceChain(sym.ParentFQN)
+	for _, parentFQN := range chain {
+		parentSym := p.index.Lookup(parentFQN)
+		if parentSym == nil {
+			continue
+		}
+		for _, child := range parentSym.Children {
+			if child.Kind == symbols.KindMethod && child.Name == sym.Name {
+				sb.WriteString(fmt.Sprintf("\nOverrides `%s::%s`\n", parentFQN, sym.Name))
+				return
+			}
+		}
+	}
+	// Default: show defined in
+	sb.WriteString(fmt.Sprintf("\nDefined in `%s`\n", sym.ParentFQN))
+}
+
+// getEffectiveDocBlock returns the docblock for a symbol, falling back to parent/interface docs.
+func (p *Provider) getEffectiveDocBlock(sym *symbols.Symbol) *parser.DocBlock {
 	if sym.DocComment != "" {
 		if doc := parser.ParseDocBlock(sym.DocComment); doc != nil {
-			if doc.Summary != "" {
-				sb.WriteString("\n" + doc.Summary + "\n")
+			return doc
+		}
+	}
+	// For methods, try inheriting from parent or interface
+	if sym.Kind == symbols.KindMethod && sym.ParentFQN != "" {
+		// Check interfaces
+		ifaces := p.index.GetImplementedInterfaces(sym.ParentFQN)
+		for _, ifaceFQN := range ifaces {
+			ifaceSym := p.index.Lookup(ifaceFQN)
+			if ifaceSym == nil {
+				continue
 			}
-			if params, ok := doc.Tags["param"]; ok && len(params) > 0 {
-				sb.WriteString("\n**Parameters:**\n")
-				for _, param := range params {
-					sb.WriteString(fmt.Sprintf("- `%s`\n", param))
+			for _, child := range ifaceSym.Children {
+				if child.Kind == symbols.KindMethod && child.Name == sym.Name && child.DocComment != "" {
+					if doc := parser.ParseDocBlock(child.DocComment); doc != nil {
+						return doc
+					}
 				}
 			}
-			if returns, ok := doc.Tags["return"]; ok && len(returns) > 0 {
-				sb.WriteString(fmt.Sprintf("\n**Returns:** `%s`\n", returns[0]))
+		}
+		// Check parent chain
+		chain := p.index.GetInheritanceChain(sym.ParentFQN)
+		for _, parentFQN := range chain {
+			parentSym := p.index.Lookup(parentFQN)
+			if parentSym == nil {
+				continue
 			}
-			if throws, ok := doc.Tags["throws"]; ok && len(throws) > 0 {
-				sb.WriteString("\n**Throws:**\n")
-				for _, t := range throws {
-					sb.WriteString(fmt.Sprintf("- `%s`\n", t))
+			for _, child := range parentSym.Children {
+				if child.Kind == symbols.KindMethod && child.Name == sym.Name && child.DocComment != "" {
+					if doc := parser.ParseDocBlock(child.DocComment); doc != nil {
+						return doc
+					}
 				}
 			}
 		}
 	}
-	return sb.String()
+	return nil
 }
 
 func fmtParams(params []symbols.ParamInfo) string {
@@ -545,6 +755,9 @@ func fmtParams(params []symbols.ParamInfo) string {
 			s += "&"
 		}
 		s += p.Name
+		if p.DefaultValue != "" {
+			s += " = " + p.DefaultValue
+		}
 		parts = append(parts, s)
 	}
 	return "(" + strings.Join(parts, ", ") + ")"

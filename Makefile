@@ -23,7 +23,7 @@ cross-build:
 	bash scripts/build.sh
 
 vscode-ext:
-	cd editors/vscode && npm install && npm run compile
+	cd editors/vscode && bun install && bun run compile
 
 vscode-package: cross-build vscode-ext
-	cd editors/vscode && npx @vscode/vsce package
+	cd editors/vscode && bunx @vscode/vsce package

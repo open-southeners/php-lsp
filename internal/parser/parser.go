@@ -226,8 +226,9 @@ func (p *PHPParser) Parse(source string) *ParseResult {
 	result := &ParseResult{
 		Lines: strings.Split(source, "\n"),
 	}
-	tokens := tokenize(source)
+	tokens, errs := tokenize(source)
 	result.Tokens = tokens
+	result.Errors = append(result.Errors, errs...)
 	parseStructure(tokens, result)
 	return result
 }
@@ -326,7 +327,8 @@ func isIdentChar(r rune) bool {
 
 // --- Tokenizer ---
 
-func tokenize(source string) []Token {
+func tokenize(source string) ([]Token, []ParseError) {
+	var errors []ParseError
 	tokens := make([]Token, 0, len(source)/4)
 	line, col, offset := 0, 0, 0
 
@@ -368,6 +370,9 @@ func tokenize(source string) []Token {
 				offset++
 			}
 			tokens = append(tokens, Token{TokenDocComment, source[start:offset], startLine, startCol, start})
+		if !strings.HasSuffix(source[start:offset], "*/") {
+			errors = append(errors, ParseError{Message: "unterminated doc comment", Line: startLine, Column: startCol})
+		}
 			continue
 		}
 
@@ -391,6 +396,9 @@ func tokenize(source string) []Token {
 				offset++
 			}
 			tokens = append(tokens, Token{TokenComment, source[start:offset], line, col, start})
+		if !strings.HasSuffix(source[start:offset], "*/") {
+			errors = append(errors, ParseError{Message: "unterminated comment", Line: line, Column: col})
+		}
 			continue
 		}
 
@@ -440,7 +448,11 @@ func tokenize(source string) []Token {
 				}
 				offset++
 			}
-			tokens = append(tokens, Token{TokenStringLiteral, source[start:offset], startLine, startCol, start})
+			val := source[start:offset]
+		tokens = append(tokens, Token{TokenStringLiteral, val, startLine, startCol, start})
+		if len(val) < 2 || val[len(val)-1] != byte(quote) {
+			errors = append(errors, ParseError{Message: "unterminated string", Line: startLine, Column: startCol})
+		}
 			continue
 		}
 
@@ -546,7 +558,7 @@ func tokenize(source string) []Token {
 	}
 
 	tokens = append(tokens, Token{TokenEOF, "", line, col, offset})
-	return tokens
+	return tokens, errors
 }
 
 func identifierToKind(word string) TokenKind {
@@ -669,9 +681,30 @@ func (p *structParser) skipBlock() {
 	}
 }
 
+// isRecoveryPoint returns true if the current token indicates a top-level
+// declaration boundary, used to recover from missing closing braces/parens.
+func (p *structParser) isRecoveryPoint() bool {
+	switch p.peek().Kind {
+	case TokenNamespace, TokenInterface, TokenTrait, TokenEnum:
+		return true
+	case TokenClass:
+		// Don't recover if preceded by 'new' (anonymous class expression)
+		for i := p.pos - 1; i >= 0; i-- {
+			k := p.tokens[i].Kind
+			if k == TokenDocComment || k == TokenComment {
+				continue
+			}
+			return k != TokenNew
+		}
+		return true
+	}
+	return false
+}
+
 func (p *structParser) parse() {
 	var lastDocComment string
 	for p.peek().Kind != TokenEOF {
+		startPos := p.pos
 		t := p.peek()
 		switch t.Kind {
 		case TokenDocComment:
@@ -701,6 +734,10 @@ func (p *structParser) parse() {
 			p.advance()
 		}
 		lastDocComment = ""
+		// Safety: ensure forward progress to prevent infinite loops on malformed input
+		if p.pos == startPos {
+			p.advance()
+		}
 	}
 }
 
@@ -987,6 +1024,11 @@ func (p *structParser) parseClassBody() (methods []MethodDef, props []PropertyDe
 	depth := 1
 	var docComment string
 	for depth > 0 && p.peek().Kind != TokenEOF {
+		// Recovery: at the outermost class level, bail on top-level keywords (missing closing brace)
+		if depth == 1 && p.isRecoveryPoint() {
+			p.result.Errors = append(p.result.Errors, ParseError{Message: "expected '}'", Line: p.peek().Line, Column: p.peek().Column})
+			return
+		}
 		t := p.peek()
 		if t.Kind == TokenDocComment {
 			docComment = t.Value
@@ -1034,6 +1076,11 @@ func (p *structParser) parseClassBody() (methods []MethodDef, props []PropertyDe
 			}
 		}
 	doneMod:
+		// Recovery after modifiers: check if we hit a top-level keyword (e.g., "abstract class Foo" after missing brace)
+		if depth == 1 && p.isRecoveryPoint() {
+			p.result.Errors = append(p.result.Errors, ParseError{Message: "expected '}'", Line: p.peek().Line, Column: p.peek().Column})
+			return
+		}
 		switch p.peek().Kind {
 		case TokenFunction:
 			p.advance()
@@ -1145,6 +1192,12 @@ func (p *structParser) parseParams() []ParamDef {
 	}
 	var params []ParamDef
 	for p.peek().Kind != TokenCloseParen && p.peek().Kind != TokenEOF {
+		// Recovery: bail on braces (missing closing paren)
+		if p.peek().Kind == TokenOpenBrace || p.peek().Kind == TokenCloseBrace {
+			p.result.Errors = append(p.result.Errors, ParseError{Message: "expected ')'", Line: p.peek().Line, Column: p.peek().Column})
+			return params
+		}
+		startPos := p.pos
 		param := ParamDef{}
 		for {
 			switch p.peek().Kind {
@@ -1207,6 +1260,10 @@ func (p *structParser) parseParams() []ParamDef {
 		}
 		params = append(params, param)
 		if p.peek().Kind == TokenComma {
+			p.advance()
+		}
+		// Safety: ensure forward progress
+		if p.pos == startPos {
 			p.advance()
 		}
 	}

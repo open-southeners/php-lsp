@@ -122,22 +122,51 @@ type FileNode struct {
 	Constants  []ConstantNode
 }
 
-type DocBlock struct {
-	Summary string
-	Tags    map[string][]string
+type DocParam struct {
+	Type        string
+	Name        string
+	Description string
 }
 
-func ParseFile(source string) *FileNode {
+type DocReturn struct {
+	Type        string
+	Description string
+}
+
+type DocThrow struct {
+	Type        string
+	Description string
+}
+
+type DocBlock struct {
+	Summary       string
+	Tags          map[string][]string
+	Params        []DocParam
+	Return        DocReturn
+	Throws        []DocThrow
+	Deprecated    bool
+	DeprecatedMsg string
+}
+
+func ParseFile(source string) (file *FileNode) {
+	var result *ParseResult
 	defer func() {
-		if recover() != nil {
-			// Invalid or unsupported source should not bring down the LSP process.
+		if r := recover(); r != nil {
+			// Return partial results if available rather than nil.
+			if result != nil {
+				func() {
+					defer func() { recover() }()
+					file = toFileNode(result)
+				}()
+			}
 		}
 	}()
-	result := New().Parse(source)
+	result = New().Parse(source)
 	if result == nil {
 		return nil
 	}
-	return toFileNode(result)
+	file = toFileNode(result)
+	return
 }
 
 func ParseDocBlock(raw string) *DocBlock {
@@ -166,6 +195,18 @@ func ParseDocBlock(raw string) *DocBlock {
 				value = strings.TrimSpace(parts[1])
 			}
 			doc.Tags[name] = append(doc.Tags[name], value)
+
+			switch name {
+			case "param":
+				doc.Params = append(doc.Params, parseDocParam(value))
+			case "return":
+				doc.Return = parseDocReturn(value)
+			case "throws":
+				doc.Throws = append(doc.Throws, parseDocThrow(value))
+			case "deprecated":
+				doc.Deprecated = true
+				doc.DeprecatedMsg = value
+			}
 			continue
 		}
 		if doc.Summary == "" {
@@ -177,6 +218,55 @@ func ParseDocBlock(raw string) *DocBlock {
 		return nil
 	}
 	return doc
+}
+
+// parseDocParam parses "@param Type $name Description" into structured DocParam.
+func parseDocParam(value string) DocParam {
+	p := DocParam{}
+	parts := strings.Fields(value)
+	if len(parts) == 0 {
+		return p
+	}
+	idx := 0
+	// First token that starts with $ is the name; everything before is the type
+	if len(parts) > 0 && !strings.HasPrefix(parts[0], "$") {
+		p.Type = parts[0]
+		idx = 1
+	}
+	if idx < len(parts) && strings.HasPrefix(parts[idx], "$") {
+		p.Name = parts[idx]
+		idx++
+	}
+	if idx < len(parts) {
+		p.Description = strings.Join(parts[idx:], " ")
+	}
+	return p
+}
+
+// parseDocReturn parses "@return Type Description" into structured DocReturn.
+func parseDocReturn(value string) DocReturn {
+	r := DocReturn{}
+	parts := strings.SplitN(value, " ", 2)
+	if len(parts) >= 1 {
+		r.Type = parts[0]
+	}
+	if len(parts) >= 2 {
+		r.Description = strings.TrimSpace(parts[1])
+	}
+	return r
+}
+
+// parseDocThrow parses "@throws Type Description" into structured DocThrow.
+func parseDocThrow(value string) DocThrow {
+	th := DocThrow{}
+	parts := strings.SplitN(value, " ", 2)
+	if len(parts) >= 1 {
+		th.Type = parts[0]
+	}
+	if len(parts) >= 2 {
+		th.Description = strings.TrimSpace(parts[1])
+	}
+	return th
 }
 
 func toFileNode(result *ParseResult) *FileNode {

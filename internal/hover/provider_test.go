@@ -189,7 +189,7 @@ func TestHoverClassInUseStatement(t *testing.T) {
 		t.Fatal("expected hover result")
 	}
 	val := hover.Contents.Value
-	if !strings.Contains(val, "class Monolog\\Logger") {
+	if !strings.Contains(val, "**class** `Monolog\\Logger`") {
 		t.Errorf("expected class info, got:\n%s", val)
 	}
 }
@@ -203,7 +203,7 @@ func TestHoverClassNameInTypeDecl(t *testing.T) {
 		t.Fatal("expected hover result")
 	}
 	val := hover.Contents.Value
-	if !strings.Contains(val, "class Monolog\\Logger") {
+	if !strings.Contains(val, "**class** `Monolog\\Logger`") {
 		t.Errorf("expected class info, got:\n%s", val)
 	}
 }
@@ -217,10 +217,10 @@ func TestHoverDocBlockTags(t *testing.T) {
 		t.Fatal("expected hover result")
 	}
 	val := hover.Contents.Value
-	if !strings.Contains(val, "Parameters:") {
+	if !strings.Contains(val, "**Params**") {
 		t.Errorf("expected @param info, got:\n%s", val)
 	}
-	if !strings.Contains(val, "Returns:") {
+	if !strings.Contains(val, "**Returns**") {
 		t.Errorf("expected @return info, got:\n%s", val)
 	}
 }
@@ -234,7 +234,7 @@ func TestHoverNewExpression(t *testing.T) {
 		t.Fatal("expected hover result")
 	}
 	val := hover.Contents.Value
-	if !strings.Contains(val, "class Monolog\\Handler\\StreamHandler") {
+	if !strings.Contains(val, "**class** `Monolog\\Handler\\StreamHandler`") {
 		t.Errorf("expected class info, got:\n%s", val)
 	}
 }
@@ -247,6 +247,199 @@ func TestHoverNoResult(t *testing.T) {
 	// void is not indexed, should return nil
 	if hover != nil {
 		t.Errorf("expected nil hover for keyword, got: %s", hover.Contents.Value)
+	}
+}
+
+func TestHoverRichCardStructure(t *testing.T) {
+	p, src := setupProvider(t)
+	pos := charPosOf(t, src, "info", "$this->logger->info")
+	hover := p.GetHover("file:///project/src/Service.php", src, pos)
+	if hover == nil {
+		t.Fatal("expected hover result")
+	}
+	val := hover.Contents.Value
+	// Should have kind header
+	if !strings.Contains(val, "**method**") {
+		t.Errorf("expected method kind header, got:\n%s", val)
+	}
+	// Should have code block with function signature
+	if !strings.Contains(val, "```php") {
+		t.Errorf("expected code block, got:\n%s", val)
+	}
+	// Should have structured params
+	if !strings.Contains(val, "**Params**") {
+		t.Errorf("expected structured params, got:\n%s", val)
+	}
+	// Should have structured return
+	if !strings.Contains(val, "**Returns** `bool`") {
+		t.Errorf("expected structured return, got:\n%s", val)
+	}
+}
+
+func TestHoverSelfKeyword(t *testing.T) {
+	p, _ := setupProvider(t)
+	// Create source with self keyword usage
+	source := `<?php
+namespace App;
+
+use Monolog\Logger;
+
+class Service {
+    private Logger $logger;
+    public function run(): void {
+        self::helper();
+    }
+    private static function helper(): void {}
+}
+`
+	pos := charPosOf(t, source, "self", "self::helper")
+	hover := p.GetHover("file:///test.php", source, pos)
+	if hover == nil {
+		t.Fatal("expected hover for self keyword")
+	}
+	val := hover.Contents.Value
+	if !strings.Contains(val, "**class**") {
+		t.Errorf("expected class hover for self, got:\n%s", val)
+	}
+	if !strings.Contains(val, "App\\Service") {
+		t.Errorf("expected App\\Service FQN, got:\n%s", val)
+	}
+}
+
+func TestHoverVariableRichCard(t *testing.T) {
+	p, src := setupProvider(t)
+	pos := charPosOf(t, src, "$logger", "__construct(Logger $logger")
+	hover := p.GetHover("file:///project/src/Service.php", src, pos)
+	if hover == nil {
+		t.Fatal("expected hover result")
+	}
+	val := hover.Contents.Value
+	// Variable hover should have kind label
+	if !strings.Contains(val, "**variable**") && !strings.Contains(val, "**parameter**") {
+		t.Errorf("expected variable/parameter kind header, got:\n%s", val)
+	}
+}
+
+func TestHoverBuiltinFunctionManualLink(t *testing.T) {
+	p, _ := setupProvider(t)
+	source := `<?php
+strlen("hello");
+`
+	pos := charPosOf(t, source, "strlen", "strlen")
+	hover := p.GetHover("file:///test.php", source, pos)
+	if hover == nil {
+		t.Fatal("expected hover for strlen")
+	}
+	val := hover.Contents.Value
+	if !strings.Contains(val, "**function**") {
+		t.Errorf("expected function kind header, got:\n%s", val)
+	}
+	if !strings.Contains(val, "php.net") {
+		t.Errorf("expected PHP manual link, got:\n%s", val)
+	}
+}
+
+func TestHoverDeprecatedTag(t *testing.T) {
+	idx := symbols.NewIndex()
+	idx.IndexFile("file:///test.php", `<?php
+class Foo {
+    /**
+     * Old method.
+     * @deprecated Use newMethod() instead.
+     * @return void
+     */
+    public function oldMethod(): void {}
+}
+`)
+	ca := container.NewContainerAnalyzer(idx, "/tmp", "none")
+	p := NewProvider(idx, ca, "none")
+
+	source := `<?php
+use Foo;
+$f = new Foo();
+$f->oldMethod();
+`
+	pos := charPosOf(t, source, "oldMethod", "oldMethod")
+	hover := p.GetHover("file:///test2.php", source, pos)
+	if hover == nil {
+		t.Fatal("expected hover for deprecated method")
+	}
+	val := hover.Contents.Value
+	if !strings.Contains(val, "Deprecated") {
+		t.Errorf("expected deprecated warning, got:\n%s", val)
+	}
+}
+
+func TestHoverEnumWithBackedType(t *testing.T) {
+	idx := symbols.NewIndex()
+	idx.IndexFile("file:///test.php", `<?php
+namespace App;
+
+enum Status: string {
+    case Active = 'active';
+    case Inactive = 'inactive';
+}
+`)
+	ca := container.NewContainerAnalyzer(idx, "/tmp", "none")
+	p := NewProvider(idx, ca, "none")
+
+	sym := idx.Lookup("App\\Status")
+	if sym == nil {
+		t.Fatal("expected enum to be indexed")
+	}
+	content := p.formatHover(sym)
+	if !strings.Contains(content, "**enum**") {
+		t.Errorf("expected enum kind header, got:\n%s", content)
+	}
+	if !strings.Contains(content, ": string") {
+		t.Errorf("expected backed type in declaration, got:\n%s", content)
+	}
+}
+
+func TestHoverConstantWithValue(t *testing.T) {
+	idx := symbols.NewIndex()
+	idx.IndexFile("file:///test.php", `<?php
+namespace App;
+
+class Config {
+    const VERSION = '1.0.0';
+}
+`)
+	ca := container.NewContainerAnalyzer(idx, "/tmp", "none")
+	p := NewProvider(idx, ca, "none")
+
+	sym := idx.Lookup("App\\Config::VERSION")
+	if sym == nil {
+		t.Fatal("expected constant to be indexed")
+	}
+	content := p.formatHover(sym)
+	if !strings.Contains(content, "**constant**") {
+		t.Errorf("expected constant kind header, got:\n%s", content)
+	}
+	if !strings.Contains(content, "'1.0.0'") {
+		t.Errorf("expected constant value, got:\n%s", content)
+	}
+}
+
+func TestHoverClassModifiers(t *testing.T) {
+	idx := symbols.NewIndex()
+	idx.IndexFile("file:///test.php", `<?php
+namespace App;
+
+abstract class BaseService {
+    abstract public function handle(): void;
+}
+`)
+	ca := container.NewContainerAnalyzer(idx, "/tmp", "none")
+	p := NewProvider(idx, ca, "none")
+
+	sym := idx.Lookup("App\\BaseService")
+	if sym == nil {
+		t.Fatal("expected class to be indexed")
+	}
+	content := p.formatHover(sym)
+	if !strings.Contains(content, "abstract class") {
+		t.Errorf("expected abstract modifier, got:\n%s", content)
 	}
 }
 
