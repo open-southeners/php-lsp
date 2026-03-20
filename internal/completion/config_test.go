@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/open-southeners/php-lsp/internal/container"
 	"github.com/open-southeners/php-lsp/internal/models"
 	"github.com/open-southeners/php-lsp/internal/protocol"
 	"github.com/open-southeners/php-lsp/internal/symbols"
@@ -276,6 +277,93 @@ func TestCompleteConfigDoesNotBreakContainerCompletion(t *testing.T) {
 	_, path, quote, ok := extractConfigArgContext("app('re")
 	if ok {
 		t.Errorf("app() should NOT trigger config context, got path=%q quote=%q", path, quote)
+	}
+}
+
+func TestCompleteConfigNoQuoteWrapsInQuotes(t *testing.T) {
+	p, _ := setupConfigProvider(t)
+
+	source := `<?php
+config(
+`
+	items := p.GetCompletions("file:///test.php", source, protocol.Position{Line: 1, Character: 7})
+
+	if len(items) == 0 {
+		t.Fatal("expected config suggestions when no quote typed")
+	}
+
+	for _, item := range items {
+		if item.Label == "database" {
+			if item.InsertText == "" || item.InsertText[0] != '\'' {
+				t.Errorf("expected quote-wrapped InsertText, got %q", item.InsertText)
+			}
+			return
+		}
+	}
+	t.Error("'database' not found in config( completions")
+}
+
+func TestCompleteConfigWithArgReturnsNoMemberAccess(t *testing.T) {
+	// config('database')-> should NOT offer Repository methods
+	idx := symbols.NewIndex()
+	idx.RegisterBuiltins()
+	// Index a fake Repository class
+	idx.IndexFileWithSource("file:///repo.php", `<?php
+namespace Illuminate\Config;
+class Repository {
+    public function get(string $key): mixed {}
+    public function set(string $key, mixed $value): void {}
+    public function all(): array {}
+    public function has(string $key): bool {}
+}
+`, symbols.SourceVendor)
+
+	p := NewProvider(idx, nil, "laravel")
+
+	source := `<?php
+config('database')->
+`
+	items := p.GetCompletions("file:///test.php", source, protocol.Position{Line: 1, Character: 20})
+
+	// Should return nil/empty — config('key') returns mixed, not Repository
+	for _, item := range items {
+		if item.Label == "get" || item.Label == "set" || item.Label == "all" || item.Label == "has" {
+			t.Errorf("should NOT show Repository method %q for config('database')->", item.Label)
+		}
+	}
+}
+
+func TestCompleteConfigNoArgReturnsMethods(t *testing.T) {
+	// config()-> SHOULD offer Repository methods
+	idx := symbols.NewIndex()
+	idx.RegisterBuiltins()
+	idx.IndexFileWithSource("file:///repo.php", `<?php
+namespace Illuminate\Config;
+class Repository {
+    public function get(string $key): mixed {}
+    public function all(): array {}
+}
+`, symbols.SourceVendor)
+
+	ca := container.NewContainerAnalyzer(idx, "/tmp", "laravel")
+	ca.Analyze()
+	p := NewProvider(idx, ca, "laravel")
+
+	source := `<?php
+config()->
+`
+	items := p.GetCompletions("file:///test.php", source, protocol.Position{Line: 1, Character: 10})
+
+	labels := make(map[string]bool)
+	for _, item := range items {
+		labels[item.Label] = true
+	}
+
+	if !labels["get"] {
+		t.Error("expected 'get' method for config()->")
+	}
+	if !labels["all"] {
+		t.Error("expected 'all' method for config()->")
 	}
 }
 
