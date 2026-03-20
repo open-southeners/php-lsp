@@ -734,11 +734,11 @@ func (p *Provider) completeArrayKeys(source string, pos protocol.Position, ctx *
 		}
 
 		insertText := k.Key
-		if ctx.Quote != "" {
-			insertText = k.Key + q
-		} else {
+		if ctx.Quote == "" {
+			// No quote typed yet — wrap fully
 			insertText = q + k.Key + q
 		}
+		// When quote is already typed, insert just the key (editor auto-pairs closing quote)
 
 		sortText := "0" + k.Key
 		if k.Optional {
@@ -1311,22 +1311,15 @@ func (p *Provider) completeContainerResolve(source, filter, currentNS, quoteCtx 
 			// Build insert text with proper quoting
 			var insertText string
 			if !strings.Contains(abstract, "\\") {
-				// String alias (e.g. "request", "cache")
 				sortText = "0" + abstract
-				if quoteCtx != "" {
-					// User already typed opening quote, just add the value + closing quote
-					insertText = abstract + q
-				} else {
-					// No quote yet, wrap fully
-					insertText = q + abstract + q
-				}
+			}
+			if quoteCtx != "" {
+				// User already typed opening quote — insert just the value
+				// (editor auto-pairs closing quote)
+				insertText = abstract
 			} else {
-				// FQN binding (e.g. "Illuminate\Contracts\Auth\Factory")
-				if quoteCtx != "" {
-					insertText = abstract + q
-				} else {
-					insertText = q + abstract + q
-				}
+				// No quote yet, wrap fully
+				insertText = q + abstract + q
 			}
 
 			items = append(items, protocol.CompletionItem{

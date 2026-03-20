@@ -330,7 +330,7 @@ class TestController {
 		t.Error("'request' binding not found in completions")
 	})
 
-	t.Run("single quote already typed adds closing quote", func(t *testing.T) {
+	t.Run("single quote already typed inserts just the key", func(t *testing.T) {
 		source := `<?php
 namespace App\Http\Controllers;
 
@@ -343,8 +343,8 @@ class TestController {
 		items := p.GetCompletions("file:///test.php", source, protocol.Position{Line: 5, Character: 13})
 		for _, item := range items {
 			if item.Label == "request" {
-				if item.InsertText != "request'" {
-					t.Errorf("expected InsertText = \"request'\", got %q", item.InsertText)
+				if item.InsertText != "request" {
+					t.Errorf("expected InsertText = \"request\", got %q", item.InsertText)
 				}
 				return
 			}
@@ -352,7 +352,7 @@ class TestController {
 		t.Error("'request' binding not found in completions")
 	})
 
-	t.Run("double quote already typed adds closing double quote", func(t *testing.T) {
+	t.Run("double quote already typed inserts just the key", func(t *testing.T) {
 		source := `<?php
 namespace App\Http\Controllers;
 
@@ -365,8 +365,8 @@ class TestController {
 		items := p.GetCompletions("file:///test.php", source, protocol.Position{Line: 5, Character: 13})
 		for _, item := range items {
 			if item.Label == "request" {
-				if item.InsertText != "request\"" {
-					t.Errorf("expected InsertText = %q, got %q", "request\"", item.InsertText)
+				if item.InsertText != "request" {
+					t.Errorf("expected InsertText = \"request\", got %q", item.InsertText)
 				}
 				return
 			}
@@ -374,7 +374,7 @@ class TestController {
 		t.Error("'request' binding not found in completions")
 	})
 
-	t.Run("FQN bindings also get quoted", func(t *testing.T) {
+	t.Run("FQN bindings with quote typed inserts just the value", func(t *testing.T) {
 		source := `<?php
 namespace App\Http\Controllers;
 
@@ -387,8 +387,8 @@ class TestController {
 		items := p.GetCompletions("file:///test.php", source, protocol.Position{Line: 5, Character: 24})
 		for _, item := range items {
 			if item.Label == "Illuminate\\Contracts\\Auth\\Factory" {
-				if item.InsertText != "Illuminate\\Contracts\\Auth\\Factory'" {
-					t.Errorf("expected closing quote in InsertText, got %q", item.InsertText)
+				if item.InsertText != "Illuminate\\Contracts\\Auth\\Factory" {
+					t.Errorf("expected just the value in InsertText, got %q", item.InsertText)
 				}
 				return
 			}
