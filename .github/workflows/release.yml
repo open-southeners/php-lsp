@@ -9,7 +9,11 @@ permissions:
   contents: write
 
 jobs:
+  test:
+    uses: ./.github/workflows/test.yml
+
   release:
+    needs: test
     runs-on: ubuntu-latest
 
     steps:
@@ -85,12 +89,11 @@ jobs:
           npm --prefix editors/vscode run compile
           cp README.md editors/vscode/README.md
           cp CHANGELOG.md editors/vscode/CHANGELOG.md
+          cp LICENSE editors/vscode/LICENSE
           (
             cd editors/vscode
             npx --yes @vscode/vsce package \
-              --out "../../dist/php-lsp-vscode-${VERSION}.vsix" \
-              --allow-missing-repository \
-              --skip-license
+              --out "../../dist/php-lsp-vscode-${VERSION}.vsix"
           )
 
           cargo build \
@@ -120,3 +123,20 @@ jobs:
             dist/php-lsp-windows-amd64.exe
             dist/php-lsp-vscode-${{ steps.version.outputs.value }}.vsix
             dist/php-lsp-zed-${{ steps.version.outputs.value }}.zip
+
+      - name: Publish to VS Code Marketplace
+        env:
+          VSCE_PAT: ${{ secrets.VSCE_PAT }}
+        if: env.VSCE_PAT != ''
+        run: |
+          npx --yes @vscode/vsce publish \
+            --packagePath "dist/php-lsp-vscode-${{ steps.version.outputs.value }}.vsix"
+
+      - name: Publish to Open VSX Registry
+        env:
+          OVSX_PAT: ${{ secrets.OVSX_PAT }}
+        if: env.OVSX_PAT != ''
+        run: |
+          npx --yes ovsx publish \
+            "dist/php-lsp-vscode-${{ steps.version.outputs.value }}.vsix" \
+            -p "$OVSX_PAT"
