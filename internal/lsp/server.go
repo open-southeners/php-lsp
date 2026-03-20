@@ -245,9 +245,11 @@ func (s *Server) handleInitialize(msg *jsonRPCMessage) {
 	s.logger.Printf("Detected framework: %s", s.framework)
 	s.index.RegisterBuiltins()
 	s.container = container.NewContainerAnalyzer(s.index, s.rootPath, s.framework)
+	arrayResolver := models.NewFrameworkArrayResolver(s.index, s.rootPath, s.framework)
 	s.completion = completion.NewProvider(s.index, s.container, s.framework)
-	s.completion.SetArrayResolver(models.NewFrameworkArrayResolver(s.index, s.rootPath, s.framework))
+	s.completion.SetArrayResolver(arrayResolver)
 	s.hover = hover.NewProvider(s.index, s.container, s.framework)
+	s.hover.SetArrayResolver(arrayResolver)
 	s.diag = diagnostics.NewProvider(s.index, s.framework, s.rootPath, s.logger, s.cfg)
 	s.analyzer = analyzer.NewAnalyzer(s.index, s.container)
 	s.sendResponse(msg.ID, protocol.InitializeResult{

@@ -3,6 +3,7 @@ package completion
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/open-southeners/php-lsp/internal/models"
@@ -245,6 +246,29 @@ config('database.
 		}
 	}
 	t.Error("'default' not found in completions")
+}
+
+func TestCompleteConfigNestedShowsSummaryDetail(t *testing.T) {
+	p, _ := setupConfigProvider(t)
+
+	source := `<?php
+config('database.
+`
+	items := p.GetCompletions("file:///test.php", source, protocol.Position{Line: 1, Character: 17})
+
+	for _, item := range items {
+		if item.Label == "connections" {
+			// Should show a summary of nested keys, not the raw array{...} type
+			if !strings.Contains(item.Detail, "mysql") {
+				t.Errorf("expected 'mysql' in detail summary, got %q", item.Detail)
+			}
+			if !strings.Contains(item.Detail, "sqlite") {
+				t.Errorf("expected 'sqlite' in detail summary, got %q", item.Detail)
+			}
+			return
+		}
+	}
+	t.Error("'connections' not found")
 }
 
 func TestCompleteConfigDoesNotBreakContainerCompletion(t *testing.T) {
