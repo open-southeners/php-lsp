@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/open-southeners/php-lsp/internal/parser"
+	"github.com/open-southeners/php-lsp/internal/phparray"
 	"github.com/open-southeners/php-lsp/internal/symbols"
 	"github.com/open-southeners/php-lsp/internal/types"
 )
@@ -160,9 +161,9 @@ func parseConfigFileAt(configPath string) []types.ShapeField {
 	for i, line := range lines {
 		trimmed := strings.TrimSpace(line)
 		if strings.HasPrefix(trimmed, "return ") || strings.HasPrefix(trimmed, "return[") {
-			arrayText := collectReturnArray(lines, i)
+			arrayText := phparray.CollectReturnArray(lines, i)
 			if arrayText != "" {
-				return parseLiteralToShape(arrayText)
+				return phparray.ParseLiteralToShape(arrayText)
 			}
 		}
 	}
@@ -487,215 +488,6 @@ func extractFirstStringArg(expr string) string {
 	return ""
 }
 
-// collectReturnArray collects an array literal from a return statement,
-// skipping block comments (/* ... */) and line comments (// ...).
-func collectReturnArray(lines []string, startLine int) string {
-	var sb strings.Builder
-	depth := 0
-	started := false
-	inBlockComment := false
-	inString := byte(0)
-
-	for i := startLine; i < len(lines) && i < startLine+500; i++ {
-		line := lines[i]
-		for j := 0; j < len(line); j++ {
-			ch := line[j]
-
-			// Handle block comment end
-			if inBlockComment {
-				if ch == '*' && j+1 < len(line) && line[j+1] == '/' {
-					inBlockComment = false
-					j++ // skip /
-				}
-				continue
-			}
-
-			// Handle string literals
-			if inString != 0 {
-				if ch == inString && (j == 0 || line[j-1] != '\\') {
-					inString = 0
-				}
-				if started {
-					sb.WriteByte(ch)
-				}
-				continue
-			}
-
-			// Check for comment starts
-			if ch == '/' && j+1 < len(line) {
-				if line[j+1] == '/' {
-					break // line comment — skip rest of line
-				}
-				if line[j+1] == '*' {
-					inBlockComment = true
-					j++ // skip *
-					continue
-				}
-			}
-
-			switch ch {
-			case '\'', '"':
-				inString = ch
-				if started {
-					sb.WriteByte(ch)
-				}
-			case '[':
-				depth++
-				started = true
-				sb.WriteByte(ch)
-			case ']':
-				if started {
-					depth--
-					sb.WriteByte(ch)
-					if depth == 0 {
-						return sb.String()
-					}
-				}
-			default:
-				if started {
-					sb.WriteByte(ch)
-				}
-			}
-		}
-		if started {
-			sb.WriteByte('\n')
-		}
-	}
-	return sb.String()
-}
-
-// parseLiteralToShape parses a PHP array literal string into ShapeFields.
-func parseLiteralToShape(arrayText string) []types.ShapeField {
-	arrayText = strings.TrimSpace(arrayText)
-	if len(arrayText) < 2 || arrayText[0] != '[' || arrayText[len(arrayText)-1] != ']' {
-		return nil
-	}
-	return parseLiteralEntries(arrayText[1 : len(arrayText)-1])
-}
-
-func parseLiteralEntries(content string) []types.ShapeField {
-	var fields []types.ShapeField
-	depth := 0
-	inString := byte(0)
-	start := 0
-	for i := 0; i < len(content); i++ {
-		ch := content[i]
-		if inString != 0 {
-			if ch == inString && (i == 0 || content[i-1] != '\\') {
-				inString = 0
-			}
-			continue
-		}
-		switch ch {
-		case '\'', '"':
-			inString = ch
-		case '[', '(':
-			depth++
-		case ']', ')':
-			depth--
-		case ',':
-			if depth == 0 {
-				if f := parseLiteralEntry(content[start:i]); f != nil {
-					fields = append(fields, *f)
-				}
-				start = i + 1
-			}
-		}
-	}
-	if start < len(content) {
-		if f := parseLiteralEntry(content[start:]); f != nil {
-			fields = append(fields, *f)
-		}
-	}
-	return fields
-}
-
-func parseLiteralEntry(entry string) *types.ShapeField {
-	entry = strings.TrimSpace(entry)
-	if entry == "" {
-		return nil
-	}
-	arrowIdx := -1
-	depth := 0
-	inString := byte(0)
-	for i := 0; i < len(entry)-1; i++ {
-		ch := entry[i]
-		if inString != 0 {
-			if ch == inString && (i == 0 || entry[i-1] != '\\') {
-				inString = 0
-			}
-			continue
-		}
-		switch ch {
-		case '\'', '"':
-			inString = ch
-		case '[', '(':
-			depth++
-		case ']', ')':
-			depth--
-		case '=':
-			if depth == 0 && i+1 < len(entry) && entry[i+1] == '>' {
-				arrowIdx = i
-				goto found
-			}
-		}
-	}
-found:
-	if arrowIdx < 0 {
-		return nil
-	}
-	keyPart := strings.TrimSpace(entry[:arrowIdx])
-	valuePart := strings.TrimSpace(entry[arrowIdx+2:])
-	if len(keyPart) >= 2 && (keyPart[0] == '\'' || keyPart[0] == '"') && keyPart[len(keyPart)-1] == keyPart[0] {
-		keyPart = keyPart[1 : len(keyPart)-1]
-	} else {
-		return nil
-	}
-	valueType := inferValueType(valuePart)
-	return &types.ShapeField{Key: keyPart, Type: valueType}
-}
-
-func inferValueType(value string) string {
-	value = strings.TrimSpace(value)
-	value = strings.TrimSuffix(value, ",")
-	value = strings.TrimSpace(value)
-	if value == "" {
-		return "mixed"
-	}
-	if strings.HasPrefix(value, "[") {
-		nested := parseLiteralToShape(value)
-		if len(nested) > 0 {
-			var parts []string
-			for _, f := range nested {
-				if f.Key != "" {
-					parts = append(parts, f.Key+": "+f.Type)
-				}
-			}
-			if len(parts) > 0 {
-				return "array{" + strings.Join(parts, ", ") + "}"
-			}
-		}
-		return "array"
-	}
-	if len(value) >= 2 && (value[0] == '\'' || value[0] == '"') {
-		return "string"
-	}
-	lower := strings.ToLower(value)
-	if lower == "true" || lower == "false" {
-		return "bool"
-	}
-	if lower == "null" {
-		return "null"
-	}
-	if len(value) > 0 && (value[0] >= '0' && value[0] <= '9' || value[0] == '-') {
-		if strings.ContainsAny(value, ".eE") {
-			return "float"
-		}
-		return "int"
-	}
-	return "mixed"
-}
-
 // extractRulesKeys parses a FormRequest class source and extracts field names
 // from the rules() method's return array.
 func extractRulesKeys(source string) []types.ShapeField {
@@ -729,10 +521,10 @@ func extractRulesKeys(source string) []types.ShapeField {
 				}
 				trimmed := strings.TrimSpace(line)
 				if inMethod && (strings.HasPrefix(trimmed, "return ") || strings.HasPrefix(trimmed, "return[")) {
-					arrayText := collectReturnArray(lines, i)
+					arrayText := phparray.CollectReturnArray(lines, i)
 					if arrayText != "" {
 						// For rules, keys are validation field names, types are rule strings
-						raw := parseLiteralToShape(arrayText)
+						raw := phparray.ParseLiteralToShape(arrayText)
 						var fields []types.ShapeField
 						for _, f := range raw {
 							fields = append(fields, types.ShapeField{
