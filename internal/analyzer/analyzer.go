@@ -1,9 +1,9 @@
 package analyzer
 
 import (
-	"regexp"
 	"strings"
 
+	"github.com/open-southeners/php-lsp/internal/completion"
 	"github.com/open-southeners/php-lsp/internal/container"
 	"github.com/open-southeners/php-lsp/internal/parser"
 	"github.com/open-southeners/php-lsp/internal/protocol"
@@ -31,6 +31,14 @@ func (a *Analyzer) FindDefinition(uri, source string, pos protocol.Position) *pr
 	}
 
 	file := parser.ParseFile(source)
+
+	// Handle container call arguments: app('request'), app(Request::class)
+	// Go to the concrete class definition
+	if a.container != nil {
+		if loc := a.definitionForContainerArg(line, pos, file, source); loc != nil {
+			return loc
+		}
+	}
 
 	// Handle $variable → go to its type definition
 	if strings.HasPrefix(word, "$") {
@@ -104,6 +112,69 @@ func (a *Analyzer) definitionForVariable(varName string, file *parser.FileNode, 
 	return nil
 }
 
+// definitionForContainerArg checks if the cursor is inside a container resolution
+// call argument (e.g. app('request'), app(Request::class)) and returns the
+// definition of the concrete class.
+func (a *Analyzer) definitionForContainerArg(line string, pos protocol.Position, file *parser.FileNode, source string) *protocol.Location {
+	prefix := line[:min(pos.Character, len(line))]
+	// Check if we're inside a container call
+	patterns := []string{"app(", "resolve(", "->get(", "->make("}
+	insideCall := false
+	var argStart int
+	for _, pat := range patterns {
+		idx := strings.LastIndex(prefix, pat)
+		if idx < 0 {
+			continue
+		}
+		after := prefix[idx+len(pat):]
+		// If there's already a closing paren before cursor, we're past the call
+		if strings.Contains(after, ")") {
+			continue
+		}
+		insideCall = true
+		argStart = idx + len(pat)
+		break
+	}
+	if !insideCall {
+		return nil
+	}
+
+	// Also grab everything after cursor to the closing paren on the same line
+	rest := line[min(pos.Character, len(line)):]
+	closeIdx := strings.Index(rest, ")")
+	var fullArg string
+	if closeIdx >= 0 {
+		fullArg = line[argStart : pos.Character+closeIdx]
+	} else {
+		fullArg = line[argStart:min(pos.Character, len(line))]
+	}
+
+	arg := strings.TrimSpace(fullArg)
+	// Strip first arg only
+	if commaIdx := strings.Index(arg, ","); commaIdx >= 0 {
+		arg = strings.TrimSpace(arg[:commaIdx])
+	}
+	arg = strings.Trim(arg, "'\"")
+
+	// Handle ::class suffix
+	if strings.HasSuffix(arg, "::class") {
+		className := strings.TrimSuffix(arg, "::class")
+		arg = a.resolveClassName(className, file)
+	}
+
+	// Resolve via container bindings
+	if binding := a.container.ResolveDependency(arg); binding != nil {
+		if sym := a.index.Lookup(binding.Concrete); sym != nil {
+			return symbolLocation(sym)
+		}
+	}
+	// Direct FQN lookup
+	if sym := a.index.Lookup(arg); sym != nil {
+		return symbolLocation(sym)
+	}
+	return nil
+}
+
 // resolveAccessChain walks left through -> and :: chains to return the FQN
 // of the class that owns the member at wordStart.
 func (a *Analyzer) resolveAccessChain(line string, wordStart int, file *parser.FileNode, source string, pos protocol.Position) string {
@@ -129,6 +200,7 @@ func (a *Analyzer) resolveAccessChain(line string, wordStart int, file *parser.F
 
 	// Skip past closing paren for method chains
 	if i > 0 && line[i-1] == ')' {
+		parenEnd := i
 		depth := 1
 		i--
 		for i > 0 && depth > 0 {
@@ -139,6 +211,15 @@ func (a *Analyzer) resolveAccessChain(line string, wordStart int, file *parser.F
 				depth--
 			}
 		}
+
+		// Check if this is a container call: app(...), resolve(...)
+		if a.container != nil {
+			callExpr := strings.TrimSpace(line[:parenEnd])
+			if concrete := a.resolveContainerCallType(callExpr, file, source); concrete != "" {
+				return concrete
+			}
+		}
+
 		for i > 0 && (line[i-1] == ' ' || line[i-1] == '\t') {
 			i--
 		}
@@ -221,26 +302,49 @@ func (a *Analyzer) resolveVariableType(varName string, file *parser.FileNode, so
 
 	lines := strings.Split(source, "\n")
 	bare := strings.TrimPrefix(varName, "$")
+	varPrefix := "$" + bare
 
 	// Look for $var = new ClassName(...)
-	newPattern := regexp.MustCompile(`\$` + regexp.QuoteMeta(bare) + `\s*=\s*new\s+([A-Za-z_\\]+)`)
 	for i := pos.Line; i >= 0 && i >= pos.Line-200; i-- {
 		if i >= len(lines) {
 			continue
 		}
-		if m := newPattern.FindStringSubmatch(lines[i]); m != nil {
-			return a.resolveClassName(m[1], file)
+		trimmed := strings.TrimSpace(lines[i])
+		if !strings.HasPrefix(trimmed, varPrefix) {
+			continue
+		}
+		rest := strings.TrimSpace(trimmed[len(varPrefix):])
+		if !strings.HasPrefix(rest, "=") {
+			continue
+		}
+		rhs := strings.TrimSpace(rest[1:])
+		if strings.HasPrefix(rhs, "new ") {
+			className := strings.TrimSpace(rhs[4:])
+			if idx := strings.IndexByte(className, '('); idx >= 0 {
+				className = className[:idx]
+			}
+			className = strings.TrimSuffix(className, ";")
+			className = strings.TrimSpace(className)
+			if className != "" {
+				return a.resolveClassName(className, file)
+			}
 		}
 	}
 
 	// Check @var annotations
-	varDocPattern := regexp.MustCompile(`@var\s+([A-Za-z_\\]+)\s+\$` + regexp.QuoteMeta(bare) + `\b`)
 	for i := pos.Line; i >= 0 && i >= pos.Line-5; i-- {
 		if i >= len(lines) {
 			continue
 		}
-		if m := varDocPattern.FindStringSubmatch(lines[i]); m != nil {
-			return a.resolveClassName(m[1], file)
+		line := lines[i]
+		varIdx := strings.Index(line, "@var ")
+		if varIdx < 0 {
+			continue
+		}
+		rest := strings.TrimSpace(line[varIdx+5:])
+		fields := strings.Fields(rest)
+		if len(fields) >= 2 && fields[1] == varPrefix {
+			return a.resolveClassName(fields[0], file)
 		}
 	}
 
@@ -343,6 +447,26 @@ func (a *Analyzer) memberType(member *symbols.Symbol, file *parser.FileNode) str
 		return member.ParentFQN
 	}
 	return a.resolveClassName(typeName, file)
+}
+
+// resolveContainerCallType resolves a container call expression to a concrete FQN.
+// Uses the shared ExtractContainerCallArg helper from the completion package.
+func (a *Analyzer) resolveContainerCallType(expr string, file *parser.FileNode, source string) string {
+	arg := completion.ExtractContainerCallArg(expr)
+	if arg == "" {
+		return ""
+	}
+	if strings.HasSuffix(arg, "::class") {
+		className := strings.TrimSuffix(arg, "::class")
+		arg = a.resolveClassName(className, file)
+	}
+	if binding := a.container.ResolveDependency(arg); binding != nil {
+		return binding.Concrete
+	}
+	if a.index.Lookup(arg) != nil {
+		return arg
+	}
+	return ""
 }
 
 func symbolLocation(sym *symbols.Symbol) *protocol.Location {

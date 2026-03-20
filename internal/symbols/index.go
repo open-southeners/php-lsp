@@ -66,25 +66,27 @@ type ParamInfo struct {
 }
 
 type Index struct {
-	mu             sync.RWMutex
-	symbols        map[string]*Symbol
-	nameIndex      map[string][]string
-	fileSymbols    map[string][]*Symbol
-	namespaceIndex map[string][]string
-	inheritanceMap map[string]string
-	implementsMap  map[string][]string
-	traitMap       map[string][]string
+	mu                    sync.RWMutex
+	symbols               map[string]*Symbol
+	nameIndex             map[string][]string
+	fileSymbols           map[string][]*Symbol
+	namespaceIndex        map[string][]string
+	inheritanceMap        map[string]string
+	implementsMap         map[string][]string   // class → interfaces it implements
+	reverseImplementsMap  map[string][]string   // interface → classes that implement it
+	traitMap              map[string][]string
 }
 
 func NewIndex() *Index {
 	return &Index{
-		symbols:        make(map[string]*Symbol),
-		nameIndex:      make(map[string][]string),
-		fileSymbols:    make(map[string][]*Symbol),
-		namespaceIndex: make(map[string][]string),
-		inheritanceMap: make(map[string]string),
-		implementsMap:  make(map[string][]string),
-		traitMap:       make(map[string][]string),
+		symbols:              make(map[string]*Symbol),
+		nameIndex:            make(map[string][]string),
+		fileSymbols:          make(map[string][]*Symbol),
+		namespaceIndex:       make(map[string][]string),
+		inheritanceMap:       make(map[string]string),
+		implementsMap:        make(map[string][]string),
+		reverseImplementsMap: make(map[string][]string),
+		traitMap:             make(map[string][]string),
 	}
 }
 
@@ -125,6 +127,7 @@ func (idx *Index) IndexFileWithSource(uri string, source string, src SymbolSourc
 		}
 		for _, impl := range resolvedImpls {
 			idx.implementsMap[fqn] = append(idx.implementsMap[fqn], impl)
+			idx.reverseImplementsMap[impl] = appendUnique(idx.reverseImplementsMap[impl], fqn)
 		}
 		for _, tr := range c.Traits {
 			idx.traitMap[fqn] = append(idx.traitMap[fqn], resolve(tr))
@@ -279,6 +282,14 @@ func (idx *Index) removeFileSymbols(uri string) {
 				idx.namespaceIndex[ns] = removeFromSlice(fqns, sym.FQN)
 			}
 		}
+		// Clean up reverse implements map
+		if ifaces, ok := idx.implementsMap[sym.FQN]; ok {
+			for _, iface := range ifaces {
+				idx.reverseImplementsMap[iface] = removeFromSlice(idx.reverseImplementsMap[iface], sym.FQN)
+			}
+		}
+		delete(idx.implementsMap, sym.FQN)
+		delete(idx.inheritanceMap, sym.FQN)
 	}
 	delete(idx.fileSymbols, uri)
 }
@@ -412,13 +423,9 @@ func (idx *Index) GetImplementors(ifaceFQN string) []*Symbol {
 	idx.mu.RLock()
 	defer idx.mu.RUnlock()
 	var results []*Symbol
-	for classFQN, ifaces := range idx.implementsMap {
-		for _, iface := range ifaces {
-			if iface == ifaceFQN {
-				if sym, ok := idx.symbols[classFQN]; ok {
-					results = append(results, sym)
-				}
-			}
+	for _, classFQN := range idx.reverseImplementsMap[ifaceFQN] {
+		if sym, ok := idx.symbols[classFQN]; ok {
+			results = append(results, sym)
 		}
 	}
 	return results
@@ -593,19 +600,17 @@ func resolveTypeName(name string, currentNs string, uses []parser.UseNode) strin
 
 func splitTypeExpr(name string) []string {
 	var parts []string
-	current := ""
-	for _, ch := range name {
-		if ch == '|' || ch == '&' {
-			if current != "" {
-				parts = append(parts, current)
+	start := 0
+	for i := 0; i < len(name); i++ {
+		if name[i] == '|' || name[i] == '&' {
+			if i > start {
+				parts = append(parts, name[start:i])
 			}
-			current = ""
-		} else {
-			current += string(ch)
+			start = i + 1
 		}
 	}
-	if current != "" {
-		parts = append(parts, current)
+	if start < len(name) {
+		parts = append(parts, name[start:])
 	}
 	return parts
 }

@@ -2,7 +2,6 @@ package hover
 
 import (
 	"fmt"
-	"regexp"
 	"strings"
 
 	"github.com/open-southeners/php-lsp/internal/container"
@@ -316,39 +315,56 @@ func (p *Provider) resolveVariableType(varName string, file *parser.FileNode, so
 
 	lines := strings.Split(source, "\n")
 	bare := strings.TrimPrefix(varName, "$")
+	varPrefix := "$" + bare
 
-	// 3. Look for `$var = new ClassName(...)` assignments before the hover position
-	newPattern := regexp.MustCompile(`\$` + regexp.QuoteMeta(bare) + `\s*=\s*new\s+([A-Za-z_\\]+)`)
+	// 3. Look for `$var = new ClassName(...)` and literal assignments
 	for i := pos.Line; i >= 0 && i >= pos.Line-200; i-- {
 		if i >= len(lines) {
 			continue
 		}
-		if m := newPattern.FindStringSubmatch(lines[i]); m != nil {
-			return p.resolveClassName(m[1], file)
+		trimmed := strings.TrimSpace(lines[i])
+		if !strings.HasPrefix(trimmed, varPrefix) {
+			continue
+		}
+		rest := strings.TrimSpace(trimmed[len(varPrefix):])
+		if !strings.HasPrefix(rest, "=") {
+			continue
+		}
+		rhs := strings.TrimSpace(rest[1:])
+		// $var = new ClassName(...)
+		if strings.HasPrefix(rhs, "new ") {
+			className := strings.TrimSpace(rhs[4:])
+			if idx := strings.IndexByte(className, '('); idx >= 0 {
+				className = className[:idx]
+			}
+			className = strings.TrimSuffix(className, ";")
+			className = strings.TrimSpace(className)
+			if className != "" {
+				return p.resolveClassName(className, file)
+			}
+		}
+		// $var = expr; — infer literal type
+		rhs = strings.TrimSuffix(rhs, ";")
+		rhs = strings.TrimSpace(rhs)
+		if t := inferLiteralType(rhs); t != "" {
+			return t
 		}
 	}
 
 	// 4. Check @var annotations: /** @var ClassName $var */
-	varDocPattern := regexp.MustCompile(`@var\s+([A-Za-z_\\]+)\s+\$` + regexp.QuoteMeta(bare) + `\b`)
 	for i := pos.Line; i >= 0 && i >= pos.Line-5; i-- {
 		if i >= len(lines) {
 			continue
 		}
-		if m := varDocPattern.FindStringSubmatch(lines[i]); m != nil {
-			return p.resolveClassName(m[1], file)
-		}
-	}
-
-	// 5. Infer type from literal assignments: $var = 'string', $var = 123, etc.
-	assignPattern := regexp.MustCompile(`\$` + regexp.QuoteMeta(bare) + `\s*=\s*(.+?)\s*;`)
-	for i := pos.Line; i >= 0 && i >= pos.Line-200; i-- {
-		if i >= len(lines) {
+		line := lines[i]
+		varIdx := strings.Index(line, "@var ")
+		if varIdx < 0 {
 			continue
 		}
-		if m := assignPattern.FindStringSubmatch(lines[i]); m != nil {
-			if t := inferLiteralType(strings.TrimSpace(m[1])); t != "" {
-				return t
-			}
+		rest := strings.TrimSpace(line[varIdx+5:])
+		fields := strings.Fields(rest)
+		if len(fields) >= 2 && fields[1] == varPrefix {
+			return p.resolveClassName(fields[0], file)
 		}
 	}
 

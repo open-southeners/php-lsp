@@ -31,17 +31,21 @@ func (p *Provider) GetCompletions(uri, source string, pos protocol.Position) []p
 	if strings.HasSuffix(trimmed, "->") || strings.HasSuffix(trimmed, "?->") {
 		return p.completeMemberAccess(uri, source, pos, prefix)
 	}
-	if strings.HasSuffix(trimmed, "::") {
-		return p.completeStaticAccess(source, prefix, pos)
-	}
-	// Typing after -> or :: (e.g. "$foo->ba" or "Foo::cr")
-	if memberCtx, filter := detectMemberContext(trimmed); memberCtx != "" {
-		if strings.Contains(memberCtx, "::") {
-			items := p.completeStaticAccess(source, memberCtx, pos)
+	// Container argument context takes priority over :: detection
+	// (e.g. app(Request::class) should not trigger static access)
+	if _, _, isContainer := extractContainerArgContext(trimmed); !isContainer {
+		if strings.HasSuffix(trimmed, "::") {
+			return p.completeStaticAccess(source, prefix, pos)
+		}
+		// Typing after -> or :: (e.g. "$foo->ba" or "Foo::cr")
+		if memberCtx, filter := detectMemberContext(trimmed); memberCtx != "" {
+			if strings.Contains(memberCtx, "::") {
+				items := p.completeStaticAccess(source, memberCtx, pos)
+				return filterByPrefix(items, filter)
+			}
+			items := p.completeMemberAccess(uri, source, pos, memberCtx)
 			return filterByPrefix(items, filter)
 		}
-		items := p.completeMemberAccess(uri, source, pos, memberCtx)
-		return filterByPrefix(items, filter)
 	}
 	if strings.HasSuffix(trimmed, "|>") {
 		currentNS := extractNamespace(source)
@@ -59,8 +63,9 @@ func (p *Provider) GetCompletions(uri, source string, pos protocol.Position) []p
 		currentNS := extractNamespace(source)
 		return p.completeUse(prefix, currentNS)
 	}
-	if strings.Contains(trimmed, "app(") || strings.Contains(trimmed, "$container->get(") {
-		return p.completeContainerResolve()
+	if filter, quoteCtx, ok := extractContainerArgContext(trimmed); ok {
+		currentNS := extractNamespace(source)
+		return p.completeContainerResolve(source, filter, currentNS, quoteCtx)
 	}
 	currentNS := extractNamespace(source)
 	// Detect namespace path typing (contains \)
@@ -154,12 +159,20 @@ func (p *Provider) completeStaticAccess(source, prefix string, pos protocol.Posi
 // resolveChainType resolves the class FQN from the expression before op (-> or ::).
 // Handles: $var->, $this->, self::, static::, parent::, ClassName::,
 // $var::, new ClassName()->, (new ClassName)->, and method chains.
+// Also handles container calls: app('request')->, app(Request::class)->, resolve(...)->
 func (p *Provider) resolveChainType(source, prefix, op string, pos protocol.Position) string {
 	idx := strings.LastIndex(prefix, op)
 	if idx < 0 {
 		return ""
 	}
 	before := strings.TrimSpace(prefix[:idx])
+
+	// Check for container call pattern: app('key'), app(Class::class), resolve('key')
+	if op == "->" && p.container != nil {
+		if concrete := p.resolveContainerCallType(before, source); concrete != "" {
+			return concrete
+		}
+	}
 
 	// Check for "new ClassName(...)" pattern before ->
 	if op == "->" {
@@ -202,6 +215,77 @@ func (p *Provider) resolveChainType(source, prefix, op string, pos protocol.Posi
 
 	// ClassName:: or ClassName->  (static access or after new)
 	return p.resolveClassNameFromSource(target, source)
+}
+
+// resolveContainerCallType checks if the expression is a container resolution call
+// like app('request'), app(Request::class), resolve('cache'), $container->get('log')
+// and returns the concrete FQN from the container bindings.
+func (p *Provider) resolveContainerCallType(expr, source string) string {
+	arg := ExtractContainerCallArg(expr)
+	if arg == "" {
+		return ""
+	}
+	// Resolve ::class references: "Request::class" → FQN
+	if strings.HasSuffix(arg, "::class") {
+		className := strings.TrimSuffix(arg, "::class")
+		arg = p.resolveClassNameFromSource(className, source)
+	}
+	if binding := p.container.ResolveDependency(arg); binding != nil {
+		return binding.Concrete
+	}
+	// Try direct lookup if arg is already a FQN
+	if p.index.Lookup(arg) != nil {
+		return arg
+	}
+	return ""
+}
+
+// ExtractContainerCallArg extracts the string/class argument from a container
+// resolution expression like app('request'), app(Request::class), resolve('cache').
+// Returns the cleaned argument or empty string if not a container call.
+func ExtractContainerCallArg(expr string) string {
+	t := strings.TrimSpace(expr)
+	// Must end with closing paren
+	if !strings.HasSuffix(t, ")") {
+		return ""
+	}
+	// Find the matching open paren
+	depth := 0
+	openIdx := -1
+	for i := len(t) - 1; i >= 0; i-- {
+		if t[i] == ')' {
+			depth++
+		} else if t[i] == '(' {
+			depth--
+			if depth == 0 {
+				openIdx = i
+				break
+			}
+		}
+	}
+	if openIdx < 0 {
+		return ""
+	}
+	// Check the function name before the paren
+	funcPart := strings.TrimSpace(t[:openIdx])
+	isContainerCall := false
+	for _, suffix := range []string{"app", "resolve", "->get", "->make"} {
+		if strings.HasSuffix(funcPart, suffix) {
+			isContainerCall = true
+			break
+		}
+	}
+	if !isContainerCall {
+		return ""
+	}
+	// Extract and clean the argument
+	arg := strings.TrimSpace(t[openIdx+1 : len(t)-1])
+	// First arg only (before comma)
+	if commaIdx := strings.Index(arg, ","); commaIdx >= 0 {
+		arg = strings.TrimSpace(arg[:commaIdx])
+	}
+	arg = strings.Trim(arg, "'\"")
+	return arg
 }
 
 // resolveClassNameFromSource resolves a short or FQN class name using
@@ -451,15 +535,137 @@ func (p *Provider) completeAttribute() []protocol.CompletionItem {
 	return items
 }
 
-func (p *Provider) completeContainerResolve() []protocol.CompletionItem {
-	var items []protocol.CompletionItem
-	for abstract, binding := range p.container.GetBindings() {
-		d := fmt.Sprintf("-> %s", binding.Concrete)
-		if binding.Singleton {
-			d += " (singleton)"
+// extractContainerArgContext detects whether the cursor is inside a container
+// resolution call like app(...), $container->get(...), $container->make(...),
+// resolve(...). Returns the partial argument text, the quote character used
+// (empty string if no quote), and true if matched.
+func extractContainerArgContext(trimmed string) (string, string, bool) {
+	// Patterns that resolve from the container
+	patterns := []string{"app(", "resolve(", "$container->get(", "$container->make(", "$this->app->make("}
+	for _, pat := range patterns {
+		idx := strings.LastIndex(trimmed, pat)
+		if idx < 0 {
+			continue
 		}
-		items = append(items, protocol.CompletionItem{Label: abstract, Kind: protocol.CompletionItemKindClass, Detail: d})
+		after := trimmed[idx+len(pat):]
+		// If there's a closing paren, cursor is past the argument — not inside
+		if strings.Contains(after, ")") {
+			continue
+		}
+		// Detect quote context
+		quote := ""
+		if len(after) > 0 && (after[0] == '\'' || after[0] == '"') {
+			quote = string(after[0])
+			after = after[1:]
+		}
+		return after, quote, true
 	}
+	return "", "", false
+}
+
+// completeContainerResolve returns completion items for container resolution calls.
+// quoteCtx is the opening quote character already typed ("'" or "\""), or empty
+// if the user hasn't typed a quote yet. String bindings get wrapped in quotes
+// accordingly.
+func (p *Provider) completeContainerResolve(source, filter, currentNS, quoteCtx string) []protocol.CompletionItem {
+	var items []protocol.CompletionItem
+	lfilter := strings.ToLower(filter)
+
+	// Default quote style for string bindings
+	q := "'"
+	if quoteCtx == "\"" {
+		q = "\""
+	}
+
+	// 1. Container bindings (string aliases and interface FQNs)
+	if p.container != nil {
+		for abstract, binding := range p.container.GetBindings() {
+			if lfilter != "" && !strings.HasPrefix(strings.ToLower(abstract), lfilter) {
+				// Also try matching the short name (e.g. "Request" matches "Illuminate\Http\Request")
+				parts := strings.Split(abstract, "\\")
+				shortName := parts[len(parts)-1]
+				if !strings.HasPrefix(strings.ToLower(shortName), lfilter) {
+					continue
+				}
+			}
+			d := fmt.Sprintf("-> %s", binding.Concrete)
+			if binding.Singleton {
+				d += " (singleton)"
+			}
+			label := abstract
+			sortText := "1" + abstract
+
+			// Build insert text with proper quoting
+			var insertText string
+			if !strings.Contains(abstract, "\\") {
+				// String alias (e.g. "request", "cache")
+				sortText = "0" + abstract
+				if quoteCtx != "" {
+					// User already typed opening quote, just add the value + closing quote
+					insertText = abstract + q
+				} else {
+					// No quote yet, wrap fully
+					insertText = q + abstract + q
+				}
+			} else {
+				// FQN binding (e.g. "Illuminate\Contracts\Auth\Factory")
+				if quoteCtx != "" {
+					insertText = abstract + q
+				} else {
+					insertText = q + abstract + q
+				}
+			}
+
+			items = append(items, protocol.CompletionItem{
+				Label:      label,
+				Kind:       protocol.CompletionItemKindValue,
+				Detail:     d,
+				InsertText: insertText,
+				SortText:   sortText,
+			})
+		}
+	}
+
+	// 2. Class name completions (ClassName::class form)
+	for _, sym := range p.index.SearchByPrefix(filter) {
+		switch sym.Kind {
+		case symbols.KindClass, symbols.KindInterface, symbols.KindEnum:
+			// Skip if already covered by a container binding with same FQN
+			if p.container != nil {
+				if _, bound := p.container.GetBindings()[sym.FQN]; bound {
+					continue
+				}
+			}
+			// Determine the insert text: use short name if imported, FQN otherwise
+			insertName := sym.FQN
+			file := parser.ParseFile(source)
+			if file != nil {
+				for _, u := range file.Uses {
+					if u.FullName == sym.FQN {
+						insertName = u.Alias
+						break
+					}
+				}
+			}
+			// If user started typing inside quotes, the ::class form needs to
+			// replace the quote context — but ::class is typically used without quotes
+			classInsert := insertName + "::class"
+			if quoteCtx != "" {
+				// User typed a quote but is selecting ::class — backtrack the quote
+				// by providing the raw class reference (editors handle textEdit better,
+				// but insertText is the baseline)
+				classInsert = insertName + "::class"
+			}
+			items = append(items, protocol.CompletionItem{
+				Label:      sym.Name + "::class",
+				Kind:       protocol.CompletionItemKindClass,
+				Detail:     sym.FQN,
+				InsertText: classInsert,
+				SortText:   sortPriority(sym, currentNS),
+			})
+		}
+	}
+
 	return items
 }
 

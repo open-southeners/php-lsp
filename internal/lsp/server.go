@@ -247,7 +247,7 @@ func (s *Server) handleInitialize(msg *jsonRPCMessage) {
 				Change:    1, // Full
 				Save:      &protocol.SaveOptions{IncludeText: false},
 			},
-			CompletionProvider: &protocol.CompletionOptions{TriggerCharacters: []string{".", ">", ":", "$", "\\", "|", "#", "["}, ResolveProvider: false},
+			CompletionProvider: &protocol.CompletionOptions{TriggerCharacters: []string{".", ">", ":", "$", "\\", "|", "#", "[", "(", "'", "\""}, ResolveProvider: false},
 			HoverProvider:      true, DefinitionProvider: true, ReferencesProvider: true, DocumentSymbolProvider: true,
 			SignatureHelpProvider: &protocol.SignatureHelpOptions{TriggerCharacters: []string{"(", ","}},
 		},

@@ -1,0 +1,10 @@
+services:
+    _defaults:
+        autowire: true
+        autoconfigure: true
+
+    App\Service\NotificationService:
+        class: App\Service\NotificationService
+
+    App\Service\PaymentProcessor:
+        class: App\Service\PaymentProcessor
