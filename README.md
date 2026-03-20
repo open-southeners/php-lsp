@@ -1,9 +1,9 @@
-# PHP LSP — Go-based Language Server for PHP 8.5+
+# Tusk PHP — Go-based Language Server for PHP 8.5+
 
 [![CI](https://github.com/open-southeners/php-lsp/actions/workflows/test.yml/badge.svg)](https://github.com/open-southeners/php-lsp/actions/workflows/test.yml)
 [![Release](https://github.com/open-southeners/php-lsp/actions/workflows/release.yml/badge.svg)](https://github.com/open-southeners/php-lsp/actions/workflows/release.yml)
-[![VS Code Marketplace](https://img.shields.io/visual-studio-marketplace/v/open-southeners.php-lsp?label=VS%20Code%20Marketplace)](https://marketplace.visualstudio.com/items?itemName=open-southeners.php-lsp)
-[![Open VSX](https://img.shields.io/open-vsx/v/open-southeners/php-lsp?label=Open%20VSX)](https://open-vsx.org/extension/open-southeners/php-lsp)
+[![VS Code Marketplace](https://img.shields.io/visual-studio-marketplace/v/open-southeners.tusk-php?label=VS%20Code%20Marketplace)](https://marketplace.visualstudio.com/items?itemName=open-southeners.tusk-php)
+[![Open VSX](https://img.shields.io/open-vsx/v/open-southeners/tusk-php?label=Open%20VSX)](https://open-vsx.org/extension/open-southeners/tusk-php)
 [![GitHub Release](https://img.shields.io/github/v/release/open-southeners/php-lsp)](https://github.com/open-southeners/php-lsp/releases/latest)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 ![PHP 8.0–8.5](https://img.shields.io/badge/PHP-8.0–8.5-777BB4?logo=php&logoColor=white)
@@ -38,19 +38,19 @@ A high-performance Language Server Protocol implementation written in **Go** for
 
 #### VS Code / VS Codium
 
-Install from the [VS Code Marketplace](https://marketplace.visualstudio.com/items?itemName=open-southeners.php-lsp) or [Open VSX Registry](https://open-vsx.org/extension/open-southeners/php-lsp):
+Install from the [VS Code Marketplace](https://marketplace.visualstudio.com/items?itemName=open-southeners.tusk-php) or [Open VSX Registry](https://open-vsx.org/extension/open-southeners/tusk-php):
 
 ```
-ext install open-southeners.php-lsp
+ext install open-southeners.tusk-php
 ```
 
-Or search for **"PHP LSP"** in the Extensions panel.
+Or search for **"Tusk PHP"** in the Extensions panel.
 
 The extension bundles the language server binary — no additional setup is required. If you prefer using your own binary, set `phpLsp.executablePath` in your settings.
 
 #### Zed
 
-Install from the Zed extension registry — search for **"PHP LSP"** in `zed: extensions`.
+Install from the Zed extension registry — search for **"Tusk PHP"** in `zed: extensions`.
 
 The extension automatically downloads the correct binary for your platform from GitHub releases.
 

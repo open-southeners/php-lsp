@@ -72,7 +72,7 @@ jobs:
         run: |
           set -euo pipefail
           rm -rf dist
-          mkdir -p "dist/php-lsp-zed-${VERSION}"
+          mkdir -p "dist/tusk-php-zed-${VERSION}"
 
           for target in linux/amd64 linux/arm64 darwin/amd64 darwin/arm64 windows/amd64; do
             IFS='/' read -r goos goarch <<< "$target"
@@ -93,7 +93,7 @@ jobs:
           (
             cd editors/vscode
             npx --yes @vscode/vsce package \
-              --out "../../dist/php-lsp-vscode-${VERSION}.vsix"
+              --out "../../dist/tusk-php-vscode-${VERSION}.vsix"
           )
 
           cargo build \
@@ -101,13 +101,13 @@ jobs:
             --target wasm32-wasip1 \
             --release
 
-          cp editors/zed/extension.toml "dist/php-lsp-zed-${VERSION}/"
-          cp editors/zed/Cargo.toml "dist/php-lsp-zed-${VERSION}/"
-          cp editors/zed/Cargo.lock "dist/php-lsp-zed-${VERSION}/"
-          cp editors/zed/target/wasm32-wasip1/release/php_lsp_zed.wasm "dist/php-lsp-zed-${VERSION}/"
+          cp editors/zed/extension.toml "dist/tusk-php-zed-${VERSION}/"
+          cp editors/zed/Cargo.toml "dist/tusk-php-zed-${VERSION}/"
+          cp editors/zed/Cargo.lock "dist/tusk-php-zed-${VERSION}/"
+          cp editors/zed/target/wasm32-wasip1/release/tusk_php_zed.wasm "dist/tusk-php-zed-${VERSION}/"
           (
             cd dist
-            zip -r "php-lsp-zed-${VERSION}.zip" "php-lsp-zed-${VERSION}"
+            zip -r "tusk-php-zed-${VERSION}.zip" "tusk-php-zed-${VERSION}"
           )
 
       - name: Publish GitHub release
@@ -121,8 +121,8 @@ jobs:
             dist/php-lsp-darwin-amd64
             dist/php-lsp-darwin-arm64
             dist/php-lsp-windows-amd64.exe
-            dist/php-lsp-vscode-${{ steps.version.outputs.value }}.vsix
-            dist/php-lsp-zed-${{ steps.version.outputs.value }}.zip
+            dist/tusk-php-vscode-${{ steps.version.outputs.value }}.vsix
+            dist/tusk-php-zed-${{ steps.version.outputs.value }}.zip
 
       - name: Publish to VS Code Marketplace
         env:
@@ -130,7 +130,7 @@ jobs:
         if: env.VSCE_PAT != ''
         run: |
           npx --yes @vscode/vsce publish \
-            --packagePath "dist/php-lsp-vscode-${{ steps.version.outputs.value }}.vsix"
+            --packagePath "dist/tusk-php-vscode-${{ steps.version.outputs.value }}.vsix"
 
       - name: Publish to Open VSX Registry
         env:
@@ -138,5 +138,5 @@ jobs:
         if: env.OVSX_PAT != ''
         run: |
           npx --yes ovsx publish \
-            "dist/php-lsp-vscode-${{ steps.version.outputs.value }}.vsix" \
+            "dist/tusk-php-vscode-${{ steps.version.outputs.value }}.vsix" \
             -p "$OVSX_PAT"
