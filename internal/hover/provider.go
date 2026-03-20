@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/open-southeners/php-lsp/internal/container"
+	"github.com/open-southeners/php-lsp/internal/models"
 	"github.com/open-southeners/php-lsp/internal/parser"
 	"github.com/open-southeners/php-lsp/internal/protocol"
 	"github.com/open-southeners/php-lsp/internal/symbols"
@@ -12,13 +13,19 @@ import (
 )
 
 type Provider struct {
-	index     *symbols.Index
-	container *container.ContainerAnalyzer
-	framework string
+	index         *symbols.Index
+	container     *container.ContainerAnalyzer
+	framework     string
+	arrayResolver *models.FrameworkArrayResolver
 }
 
 func NewProvider(index *symbols.Index, ca *container.ContainerAnalyzer, framework string) *Provider {
 	return &Provider{index: index, container: ca, framework: framework}
+}
+
+// SetArrayResolver sets the framework array resolver for config hover.
+func (p *Provider) SetArrayResolver(resolver *models.FrameworkArrayResolver) {
+	p.arrayResolver = resolver
 }
 
 func (p *Provider) GetHover(uri, source string, pos protocol.Position) *protocol.Hover {
@@ -31,6 +38,11 @@ func (p *Provider) GetHover(uri, source string, pos protocol.Position) *protocol
 	// Check for array key hover: $config['key'] or $config['db']['host'] — cursor on a key
 	if ctx, ok := getArrayKeyContext(line, pos.Character); ok {
 		return p.hoverArrayKey(source, pos, ctx)
+	}
+
+	// Check for config key hover: config('database.connections.mysql')
+	if hover := p.hoverConfigKey(line, pos.Character); hover != nil {
+		return hover
 	}
 
 	word := getWordAt(source, pos)
@@ -1078,6 +1090,121 @@ func (p *Provider) hoverArrayKey(source string, pos protocol.Position, ctx *hove
 	}
 
 	return nil
+}
+
+// hoverConfigKey provides hover for config key strings inside config('key.path').
+func (p *Provider) hoverConfigKey(line string, character int) *protocol.Hover {
+	if p.arrayResolver == nil {
+		return nil
+	}
+
+	// Find config( before the cursor on this line
+	configIdx := strings.LastIndex(line[:min(character+1, len(line))], "config(")
+	if configIdx < 0 {
+		return nil
+	}
+	after := line[configIdx+len("config("):]
+
+	// Must have an opening quote
+	if len(after) == 0 || (after[0] != '\'' && after[0] != '"') {
+		return nil
+	}
+	openQuote := after[0]
+	after = after[1:]
+
+	// Find closing quote
+	closeIdx := strings.IndexByte(after, openQuote)
+	if closeIdx < 0 {
+		return nil
+	}
+
+	// Check cursor is inside the string
+	stringStart := configIdx + len("config(") + 1 // after open quote
+	stringEnd := stringStart + closeIdx
+	if character < stringStart || character > stringEnd {
+		return nil
+	}
+
+	fullKey := after[:closeIdx]
+	if fullKey == "" {
+		return nil
+	}
+
+	// Resolve the config value at this path
+	parts := strings.Split(fullKey, ".")
+	configFile := parts[0]
+	keys := p.arrayResolver.ParseConfigFile(configFile)
+	if keys == nil {
+		return nil
+	}
+
+	// For top-level key only (e.g. config('database')), show the file's shape
+	if len(parts) == 1 {
+		var keyNames []string
+		for _, k := range keys {
+			if k.Key != "" {
+				keyNames = append(keyNames, k.Key)
+			}
+			if len(keyNames) >= 6 {
+				keyNames = append(keyNames, "...")
+				break
+			}
+		}
+		return &protocol.Hover{Contents: protocol.MarkupContent{
+			Kind:  "markdown",
+			Value: fmt.Sprintf("```php\n(config) %s: array{%s}\n```", fullKey, strings.Join(keyNames, ", ")),
+		}}
+	}
+
+	// Drill through dot segments to find the target
+	var targetField *types.ShapeField
+	for _, segment := range parts[1:] {
+		found := false
+		for i := range keys {
+			if keys[i].Key == segment {
+				targetField = &keys[i]
+				found = true
+				break
+			}
+		}
+		if !found {
+			return nil
+		}
+		// If there are more segments, drill into the nested shape
+		nested := types.ParseArrayShape(targetField.Type)
+		if nested != nil {
+			keys = nested
+		}
+	}
+
+	if targetField == nil {
+		return nil
+	}
+
+	// Show the resolved type
+	detail := targetField.Type
+	if strings.HasPrefix(detail, "array{") {
+		// Summarize nested keys
+		inner := types.ParseArrayShape(detail)
+		if len(inner) > 0 {
+			var names []string
+			for _, f := range inner {
+				if f.Key != "" {
+					names = append(names, f.Key)
+				}
+				if len(names) >= 6 {
+					names = append(names, "...")
+					break
+				}
+			}
+			detail = "array{" + strings.Join(names, ", ") + "}"
+		}
+	}
+
+	return &protocol.Hover{Contents: protocol.MarkupContent{
+		Kind:  "markdown",
+		Value: fmt.Sprintf("```php\n(config) %s: %s\n```", fullKey, detail),
+	}}
 }
 
 // resolveArrayShape resolves shape fields for a variable from docblock annotations.

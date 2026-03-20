@@ -1348,8 +1348,27 @@ func (p *Provider) completeConfigKeys(configPath, partial, quote string) []proto
 			continue
 		}
 
-		detail := k.Type
 		isNested := strings.HasPrefix(k.Type, "array{") || k.Type == "array"
+
+		// Show helpful detail
+		detail := k.Type
+		if isNested && strings.HasPrefix(k.Type, "array{") {
+			// Summarize nested keys: "array{host: string, port: int}" → "{host, port, ...}"
+			inner := types.ParseArrayShape(k.Type)
+			if len(inner) > 0 {
+				var names []string
+				for _, f := range inner {
+					if f.Key != "" {
+						names = append(names, f.Key)
+					}
+					if len(names) >= 4 {
+						names = append(names, "...")
+						break
+					}
+				}
+				detail = "{" + strings.Join(names, ", ") + "}"
+			}
+		}
 
 		// InsertText: just the key segment, no quotes (user already has them)
 		insertText := k.Key
