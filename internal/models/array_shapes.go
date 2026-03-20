@@ -487,17 +487,30 @@ func extractFirstStringArg(expr string) string {
 	return ""
 }
 
-// collectReturnArray collects an array literal from a return statement.
+// collectReturnArray collects an array literal from a return statement,
+// skipping block comments (/* ... */) and line comments (// ...).
 func collectReturnArray(lines []string, startLine int) string {
 	var sb strings.Builder
 	depth := 0
 	started := false
+	inBlockComment := false
+	inString := byte(0)
 
 	for i := startLine; i < len(lines) && i < startLine+500; i++ {
 		line := lines[i]
-		inString := byte(0)
 		for j := 0; j < len(line); j++ {
 			ch := line[j]
+
+			// Handle block comment end
+			if inBlockComment {
+				if ch == '*' && j+1 < len(line) && line[j+1] == '/' {
+					inBlockComment = false
+					j++ // skip /
+				}
+				continue
+			}
+
+			// Handle string literals
 			if inString != 0 {
 				if ch == inString && (j == 0 || line[j-1] != '\\') {
 					inString = 0
@@ -507,6 +520,19 @@ func collectReturnArray(lines []string, startLine int) string {
 				}
 				continue
 			}
+
+			// Check for comment starts
+			if ch == '/' && j+1 < len(line) {
+				if line[j+1] == '/' {
+					break // line comment — skip rest of line
+				}
+				if line[j+1] == '*' {
+					inBlockComment = true
+					j++ // skip *
+					continue
+				}
+			}
+
 			switch ch {
 			case '\'', '"':
 				inString = ch

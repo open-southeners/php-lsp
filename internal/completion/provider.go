@@ -75,6 +75,10 @@ func (p *Provider) GetCompletions(uri, source string, pos protocol.Position) []p
 	if ctx := parseArrayKeyContext(prefix); ctx != nil {
 		return p.completeArrayKeys(source, pos, ctx)
 	}
+	// Config result array access: config('database')['connections']['
+	if ctx := parseConfigResultArrayContext(prefix); ctx != nil {
+		return p.completeConfigResultKeys(ctx)
+	}
 	// Config key completion: config('database.|') with dot-notation navigation
 	if configPath, partial, quote, ok := extractConfigArgContext(trimmed); ok {
 		return p.completeConfigKeys(configPath, partial, quote)
@@ -184,8 +188,12 @@ func (p *Provider) resolveChainType(source, prefix, op string, pos protocol.Posi
 	before := strings.TrimSpace(prefix[:idx])
 
 	// Check for container call pattern: app('key'), app(Class::class), resolve('key')
-	if op == "->" && p.container != nil {
+	// Also blocks config('key')-> which returns mixed, not a class
+	if op == "->" {
 		if concrete := p.resolveContainerCallType(before, source); concrete != "" {
+			if concrete == "-" {
+				return "" // signal: known call returning mixed, stop resolution
+			}
 			return concrete
 		}
 	}
@@ -236,7 +244,21 @@ func (p *Provider) resolveChainType(source, prefix, op string, pos protocol.Posi
 // resolveContainerCallType checks if the expression is a container resolution call
 // like app('request'), app(Request::class), resolve('cache'), $container->get('log')
 // and returns the concrete FQN from the container bindings.
+// config() with no args returns Repository; config('key') returns mixed (no resolution).
 func (p *Provider) resolveContainerCallType(expr, source string) string {
+	// Special case: config() with no args returns the Repository instance
+	t := strings.TrimSpace(expr)
+	if t == "config()" {
+		if binding := p.container.ResolveDependency("config"); binding != nil {
+			return binding.Concrete
+		}
+		return "Illuminate\\Config\\Repository"
+	}
+	// config('key') returns a mixed value, not a class — signal to stop resolution
+	if strings.HasPrefix(t, "config(") && strings.HasSuffix(t, ")") {
+		return "-"
+	}
+
 	arg := ExtractContainerCallArg(expr)
 	if arg == "" {
 		return ""
@@ -1252,6 +1274,236 @@ func extractIncrementalKey(trimmed, varName string) string {
 	return after[1 : endQ+1]
 }
 
+// configResultArrayContext holds parsed context for config('key')['nested']['
+type configResultArrayContext struct {
+	ConfigArg  string   // the config argument, e.g. "database"
+	AccessKeys []string // completed bracket accesses after ), e.g. ["connections"]
+	Partial    string   // partial key being typed
+	Quote      string   // quote character
+}
+
+// parseConfigResultArrayContext detects config('key')['nested'][' patterns.
+// Returns nil if the cursor is not in this context.
+func parseConfigResultArrayContext(prefix string) *configResultArrayContext {
+	// Scan backward from cursor to find the pattern:
+	//   config('arg')['key1']['key2']['partial
+	i := len(prefix) - 1
+
+	// Step 1: extract partial key (same as array key context)
+	partialStart := i + 1
+	for i >= 0 && prefix[i] != '\'' && prefix[i] != '"' && prefix[i] != '[' {
+		i--
+	}
+	if i < 0 {
+		return nil
+	}
+
+	var partial, quote string
+	if prefix[i] == '\'' || prefix[i] == '"' {
+		quote = string(prefix[i])
+		partial = prefix[i+1 : partialStart]
+		i--
+	} else if prefix[i] == '[' {
+		partial = ""
+	}
+
+	// Step 2: expect [
+	for i >= 0 && (prefix[i] == ' ' || prefix[i] == '\t') {
+		i--
+	}
+	if i < 0 {
+		return nil
+	}
+	if prefix[i] == '[' {
+		i--
+	} else if quote == "" {
+		// already on [
+	} else {
+		return nil
+	}
+
+	// Step 3: collect completed ['key'] access chains
+	var accessKeys []string
+	for i >= 0 {
+		for i >= 0 && (prefix[i] == ' ' || prefix[i] == '\t') {
+			i--
+		}
+		if i < 0 || prefix[i] != ']' {
+			break
+		}
+		i-- // skip ]
+		if i < 0 || (prefix[i] != '\'' && prefix[i] != '"') {
+			break
+		}
+		closeQ := prefix[i]
+		i--
+		keyEnd := i + 1
+		for i >= 0 && prefix[i] != closeQ {
+			i--
+		}
+		if i < 0 {
+			break
+		}
+		key := prefix[i+1 : keyEnd]
+		i-- // skip opening quote
+		for i >= 0 && (prefix[i] == ' ' || prefix[i] == '\t') {
+			i--
+		}
+		if i < 0 || prefix[i] != '[' {
+			break
+		}
+		i-- // skip [
+		accessKeys = append([]string{key}, accessKeys...)
+	}
+
+	// Step 4: expect ) from the config() call
+	for i >= 0 && (prefix[i] == ' ' || prefix[i] == '\t') {
+		i--
+	}
+	if i < 0 || prefix[i] != ')' {
+		return nil
+	}
+	i-- // skip )
+
+	// Step 5: find the matching ( and extract config argument
+	depth := 1
+	for i >= 0 && depth > 0 {
+		if prefix[i] == ')' {
+			depth++
+		} else if prefix[i] == '(' {
+			depth--
+		}
+		if depth > 0 {
+			i--
+		}
+	}
+	if i < 0 || prefix[i] != '(' {
+		return nil
+	}
+	// Extract the string argument inside ()
+	argContent := prefix[i+1:]
+	// Find the closing ) we started from
+	closeP := strings.Index(argContent, ")")
+	if closeP < 0 {
+		return nil
+	}
+	argContent = strings.TrimSpace(argContent[:closeP])
+	// Strip quotes
+	configArg := ""
+	if len(argContent) >= 2 && (argContent[0] == '\'' || argContent[0] == '"') && argContent[len(argContent)-1] == argContent[0] {
+		configArg = argContent[1 : len(argContent)-1]
+	}
+	if configArg == "" {
+		return nil
+	}
+
+	i-- // move before (
+
+	// Step 6: expect "config" before (
+	for i >= 0 && (prefix[i] == ' ' || prefix[i] == '\t') {
+		i--
+	}
+	end := i + 1
+	for i >= 0 && isCompletionWordChar(prefix[i]) {
+		i--
+	}
+	funcName := prefix[i+1 : end]
+	if funcName != "config" {
+		return nil
+	}
+
+	return &configResultArrayContext{
+		ConfigArg:  configArg,
+		AccessKeys: accessKeys,
+		Partial:    partial,
+		Quote:      quote,
+	}
+}
+
+// completeConfigResultKeys provides completion for config('key')['nested'][' patterns.
+func (p *Provider) completeConfigResultKeys(ctx *configResultArrayContext) []protocol.CompletionItem {
+	if p.arrayResolver == nil {
+		return nil
+	}
+
+	// Resolve the config value at the dot-notation path
+	parts := strings.Split(ctx.ConfigArg, ".")
+	configFile := parts[0]
+	keys := p.arrayResolver.ParseConfigFile(configFile)
+	if keys == nil {
+		return nil
+	}
+
+	// Drill through dot-notation segments
+	for _, segment := range parts[1:] {
+		var nestedType string
+		for _, f := range keys {
+			if f.Key == segment {
+				nestedType = f.Type
+				break
+			}
+		}
+		if nestedType == "" {
+			return nil
+		}
+		keys = types.ParseArrayShape(nestedType)
+		if keys == nil {
+			return nil
+		}
+	}
+
+	// Drill through bracket access keys
+	for _, accessKey := range ctx.AccessKeys {
+		var nestedType string
+		for _, f := range keys {
+			if f.Key == accessKey {
+				nestedType = f.Type
+				break
+			}
+		}
+		if nestedType == "" {
+			return nil
+		}
+		keys = types.ParseArrayShape(nestedType)
+		if keys == nil {
+			return nil
+		}
+	}
+
+	if len(keys) == 0 {
+		return nil
+	}
+
+	// Build completion items
+	q := "'"
+	if ctx.Quote == "\"" {
+		q = "\""
+	}
+
+	var items []protocol.CompletionItem
+	lpartial := strings.ToLower(ctx.Partial)
+	for _, k := range keys {
+		if k.Key == "" {
+			continue
+		}
+		if lpartial != "" && !strings.HasPrefix(strings.ToLower(k.Key), lpartial) {
+			continue
+		}
+		insertText := k.Key
+		if ctx.Quote == "" {
+			insertText = q + k.Key + q
+		}
+		items = append(items, protocol.CompletionItem{
+			Label:      k.Key,
+			Kind:       protocol.CompletionItemKindProperty,
+			Detail:     k.Type,
+			InsertText: insertText,
+			SortText:   "0" + k.Key,
+		})
+	}
+	return items
+}
+
 // extractConfigArgContext detects if the cursor is inside a config() call.
 // Returns the dot-separated path typed so far, the partial segment being typed,
 // the quote character, and true if matched.
@@ -1277,8 +1529,14 @@ func extractConfigArgContext(trimmed string) (configPath, partial, quote string,
 		quote = string(after[0])
 		after = after[1:]
 	} else if len(after) == 0 {
-		// Just "config(" with nothing after — offer quotes
+		// Just "config(" with nothing after — offer config files with quotes
+		ok = true
 		return
+	}
+	// Strip trailing closing quote if cursor is before it (editor auto-paired)
+	// e.g. prefix="config('database.'" → after="database.'" → strip trailing '
+	if quote != "" && len(after) > 0 && after[len(after)-1] == quote[0] {
+		after = after[:len(after)-1]
 	}
 
 	// Split on dots: "database.connections.co" → path="database.connections", partial="co"
@@ -1370,11 +1628,15 @@ func (p *Provider) completeConfigKeys(configPath, partial, quote string) []proto
 			}
 		}
 
-		// InsertText: just the key segment, no quotes (user already has them)
+		// InsertText: wrap in quotes if user hasn't typed one, otherwise just the key
 		insertText := k.Key
 		if isNested {
-			// For nested arrays, append a dot to continue drilling
 			insertText = k.Key + "."
+		}
+		if quote == "" {
+			// No quote typed — wrap fully (e.g. config( → 'database.')
+			q := "'"
+			insertText = q + insertText + q
 		}
 
 		kind := protocol.CompletionItemKindProperty
