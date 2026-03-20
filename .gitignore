@@ -7,3 +7,4 @@ target/
 .vscode-test/
 plans/
 .DS_Store
+/CLAUDE.md
