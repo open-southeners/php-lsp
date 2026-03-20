@@ -152,7 +152,7 @@ func TestPHPStanOutputParsing(t *testing.T) {
 		}
 	}`)
 
-	diags := r.parseOutput(output)
+	diags := r.parseOutput(output, nil)
 	if len(diags) != 2 {
 		t.Fatalf("expected 2 diagnostics, got %d", len(diags))
 	}
@@ -186,12 +186,90 @@ func TestPHPStanOutputWithPreamble(t *testing.T) {
 	output := []byte(`Note: Using configuration file phpstan.neon.
 {"totals":{"errors":0,"file_errors":1},"files":{"/test.php":{"errors":1,"messages":[{"message":"Undefined variable: $x","line":3,"ignorable":true,"identifier":"variable.undefined"}]}}}`)
 
-	diags := r.parseOutput(output)
+	diags := r.parseOutput(output, nil)
 	if len(diags) != 1 {
 		t.Fatalf("expected 1 diagnostic, got %d", len(diags))
 	}
 	if diags[0].Range.Start.Line != 2 {
 		t.Errorf("expected line 2, got %d", diags[0].Range.Start.Line)
+	}
+}
+
+func TestPHPStanDiagnosticRange(t *testing.T) {
+	r := &phpstanRunner{logger: log.New(io.Discard, "", 0)}
+
+	output := []byte(`{"totals":{"errors":0,"file_errors":2},"files":{"/test.php":{"errors":2,"messages":[
+		{"message":"Function clients not found.","line":5,"ignorable":true,"identifier":"function.notFound"},
+		{"message":"Call to undefined method App\\Service::missing().","line":8,"ignorable":true,"identifier":"method.notFound"}
+	]}}}`)
+
+	lines := []string{
+		"<?php",                                   // 0
+		"",                                        // 1
+		"namespace App\\Http\\Controllers;",       // 2
+		"",                                        // 3
+		"        clients();",                      // 4 (line 5 in PHPStan = 0-based 4)
+		"",                                        // 5
+		"        $svc = new Service();",           // 6
+		"        $svc->missing();",                // 7 (line 8 in PHPStan = 0-based 7)
+	}
+
+	diags := r.parseOutput(output, lines)
+	if len(diags) != 2 {
+		t.Fatalf("expected 2 diagnostics, got %d", len(diags))
+	}
+
+	// "Function clients not found" → should highlight "clients" on line 4
+	d0 := diags[0]
+	if d0.Range.Start.Line != 4 {
+		t.Errorf("d0: expected line 4, got %d", d0.Range.Start.Line)
+	}
+	// "clients" starts at col 8 in "        clients();"
+	if d0.Range.Start.Character != 8 {
+		t.Errorf("d0: expected start col 8, got %d", d0.Range.Start.Character)
+	}
+	if d0.Range.End.Character != 8+len("clients") {
+		t.Errorf("d0: expected end col %d, got %d", 8+len("clients"), d0.Range.End.Character)
+	}
+
+	// "Call to undefined method App\Service::missing()" → should highlight "missing"
+	d1 := diags[1]
+	if d1.Range.Start.Line != 7 {
+		t.Errorf("d1: expected line 7, got %d", d1.Range.Start.Line)
+	}
+	// "missing" appears after "$svc->" at col 14 in "        $svc->missing();"
+	if d1.Range.Start.Character != 14 {
+		t.Errorf("d1: expected start col 14 for 'missing', got %d", d1.Range.Start.Character)
+	}
+	if d1.Range.End.Character != 14+len("missing") {
+		t.Errorf("d1: expected end col %d, got %d", 14+len("missing"), d1.Range.End.Character)
+	}
+}
+
+func TestPHPStanDiagnosticRangeFallback(t *testing.T) {
+	r := &phpstanRunner{logger: log.New(io.Discard, "", 0)}
+
+	output := []byte(`{"totals":{"errors":0,"file_errors":1},"files":{"/test.php":{"errors":1,"messages":[
+		{"message":"Some obscure error.","line":2,"ignorable":true,"identifier":"phpstan"}
+	]}}}`)
+
+	lines := []string{
+		"<?php",                         // 0
+		"    $x = something_weird();",   // 1 (line 2 in PHPStan = 0-based 1)
+	}
+
+	diags := r.parseOutput(output, lines)
+	if len(diags) != 1 {
+		t.Fatalf("expected 1 diagnostic, got %d", len(diags))
+	}
+
+	// No identifier found in message → should highlight trimmed line content
+	d := diags[0]
+	if d.Range.Start.Character != 4 { // skip 4 leading spaces
+		t.Errorf("expected start col 4, got %d", d.Range.Start.Character)
+	}
+	if d.Range.End.Character != len("    $x = something_weird();") {
+		t.Errorf("expected end col %d, got %d", len("    $x = something_weird();"), d.Range.End.Character)
 	}
 }
 

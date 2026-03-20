@@ -32,7 +32,16 @@ func (p *Provider) GetCompletions(uri, source string, pos protocol.Position) []p
 		return p.completeMemberAccess(uri, source, pos, prefix)
 	}
 	if strings.HasSuffix(trimmed, "::") {
-		return p.completeStaticAccess(prefix)
+		return p.completeStaticAccess(source, prefix, pos)
+	}
+	// Typing after -> or :: (e.g. "$foo->ba" or "Foo::cr")
+	if memberCtx, filter := detectMemberContext(trimmed); memberCtx != "" {
+		if strings.Contains(memberCtx, "::") {
+			items := p.completeStaticAccess(source, memberCtx, pos)
+			return filterByPrefix(items, filter)
+		}
+		items := p.completeMemberAccess(uri, source, pos, memberCtx)
+		return filterByPrefix(items, filter)
 	}
 	if strings.HasSuffix(trimmed, "|>") {
 		currentNS := extractNamespace(source)
@@ -54,19 +63,43 @@ func (p *Provider) GetCompletions(uri, source string, pos protocol.Position) []p
 		return p.completeContainerResolve()
 	}
 	currentNS := extractNamespace(source)
-	return p.completeGlobal(prefix, currentNS)
+	// Detect namespace path typing (contains \)
+	search := extractLastWord(prefix)
+	if strings.Contains(search, "\\") {
+		return p.completeNamespacePath(search, currentNS)
+	}
+	items := p.completeGlobal(prefix, currentNS)
+	// Add $this if inside a class method
+	lastWord := ""
+	if w := strings.Fields(strings.TrimSpace(prefix)); len(w) > 0 {
+		lastWord = w[len(w)-1]
+	}
+	if lastWord == "" || strings.HasPrefix("$this", strings.ToLower(lastWord)) {
+		if file := parser.ParseFile(source); file != nil {
+			if findEnclosingClass(file, pos) != "" {
+				items = append(items, protocol.CompletionItem{
+					Label:    "$this",
+					Kind:     protocol.CompletionItemKindVariable,
+					Detail:   "Current object instance",
+					SortText: "0$this",
+				})
+			}
+		}
+	}
+	return items
 }
 
 func (p *Provider) completeMemberAccess(uri, source string, pos protocol.Position, prefix string) []protocol.CompletionItem {
-	var items []protocol.CompletionItem
-	varName := extractVariableBefore(prefix, "->")
-	typeName := p.resolveVariableType(source, varName)
+	typeName := p.resolveChainType(source, prefix, "->", pos)
 	if typeName == "" {
-		return items
+		return nil
 	}
-	if binding := p.container.ResolveDependency(typeName); binding != nil {
-		typeName = binding.Concrete
+	if p.container != nil {
+		if binding := p.container.ResolveDependency(typeName); binding != nil {
+			typeName = binding.Concrete
+		}
 	}
+	var items []protocol.CompletionItem
 	for _, m := range p.index.GetClassMembers(typeName) {
 		if m.IsStatic || m.Visibility == "private" {
 			continue
@@ -80,35 +113,265 @@ func (p *Provider) completeMemberAccess(uri, source string, pos protocol.Positio
 		case symbols.KindProperty:
 			item.Label = strings.TrimPrefix(m.Name, "$")
 			item.Kind = protocol.CompletionItemKindProperty
-		case symbols.KindConstant:
-			item.Kind = protocol.CompletionItemKindConstant
 		}
 		items = append(items, item)
 	}
 	return items
 }
 
-func (p *Provider) completeStaticAccess(prefix string) []protocol.CompletionItem {
+func (p *Provider) completeStaticAccess(source, prefix string, pos protocol.Position) []protocol.CompletionItem {
+	typeName := p.resolveChainType(source, prefix, "::", pos)
+	if typeName == "" {
+		return nil
+	}
 	var items []protocol.CompletionItem
-	className := extractClassBefore(prefix, "::")
-	for _, sym := range p.index.LookupByName(className) {
-		for _, m := range p.index.GetClassMembers(sym.FQN) {
-			if !m.IsStatic && m.Kind != symbols.KindConstant && m.Kind != symbols.KindEnumCase {
+	for _, m := range p.index.GetClassMembers(typeName) {
+		if !m.IsStatic && m.Kind != symbols.KindConstant && m.Kind != symbols.KindEnumCase {
+			continue
+		}
+		item := protocol.CompletionItem{Label: m.Name, Detail: formatDetail(m)}
+		switch m.Kind {
+		case symbols.KindMethod:
+			item.Kind = protocol.CompletionItemKindMethod
+			item.InsertText = m.Name + "($0)"
+			item.InsertTextFormat = 2
+		case symbols.KindConstant:
+			item.Kind = protocol.CompletionItemKindConstant
+		case symbols.KindEnumCase:
+			item.Kind = protocol.CompletionItemKindEnumMember
+		case symbols.KindProperty:
+			if m.IsStatic {
+				item.Kind = protocol.CompletionItemKindProperty
+			} else {
 				continue
 			}
-			item := protocol.CompletionItem{Label: m.Name, Detail: formatDetail(m)}
-			switch m.Kind {
-			case symbols.KindMethod:
-				item.Kind = protocol.CompletionItemKindMethod
-			case symbols.KindConstant:
-				item.Kind = protocol.CompletionItemKindConstant
-			case symbols.KindEnumCase:
-				item.Kind = protocol.CompletionItemKindEnumMember
-			}
-			items = append(items, item)
 		}
+		items = append(items, item)
 	}
 	return items
+}
+
+// resolveChainType resolves the class FQN from the expression before op (-> or ::).
+// Handles: $var->, $this->, self::, static::, parent::, ClassName::,
+// $var::, new ClassName()->, (new ClassName)->, and method chains.
+func (p *Provider) resolveChainType(source, prefix, op string, pos protocol.Position) string {
+	idx := strings.LastIndex(prefix, op)
+	if idx < 0 {
+		return ""
+	}
+	before := strings.TrimSpace(prefix[:idx])
+
+	// Check for "new ClassName(...)" pattern before ->
+	if op == "->" {
+		if newClass := extractNewClass(before); newClass != "" {
+			return p.resolveClassNameFromSource(newClass, source)
+		}
+	}
+
+	// Extract the target token (variable or class name)
+	target := extractTrailingToken(before)
+	if target == "" {
+		return ""
+	}
+
+	file := parser.ParseFile(source)
+
+	switch target {
+	case "$this", "self", "static":
+		if file != nil {
+			return findEnclosingClass(file, pos)
+		}
+		return ""
+	case "parent":
+		if file != nil {
+			classFQN := findEnclosingClass(file, pos)
+			if classFQN != "" {
+				chain := p.index.GetInheritanceChain(classFQN)
+				if len(chain) > 0 {
+					return chain[0]
+				}
+			}
+		}
+		return ""
+	}
+
+	// $variable-> or $variable::
+	if strings.HasPrefix(target, "$") {
+		return p.resolveVariableType(source, target)
+	}
+
+	// ClassName:: or ClassName->  (static access or after new)
+	return p.resolveClassNameFromSource(target, source)
+}
+
+// resolveClassNameFromSource resolves a short or FQN class name using
+// the source file's use statements and namespace.
+func (p *Provider) resolveClassNameFromSource(name, source string) string {
+	if name == "" {
+		return ""
+	}
+	// Already fully qualified
+	if strings.HasPrefix(name, "\\") {
+		fqn := strings.TrimPrefix(name, "\\")
+		if p.index.Lookup(fqn) != nil {
+			return fqn
+		}
+		return fqn
+	}
+
+	file := parser.ParseFile(source)
+	if file == nil {
+		// Try direct lookup by name
+		syms := p.index.LookupByName(name)
+		if best := symbols.PickBestStandalone(syms, name); best != nil {
+			return best.FQN
+		}
+		return name
+	}
+
+	// Check use statements
+	parts := strings.SplitN(name, "\\", 2)
+	for _, u := range file.Uses {
+		if u.Alias == parts[0] {
+			if len(parts) > 1 {
+				return u.FullName + "\\" + parts[1]
+			}
+			return u.FullName
+		}
+	}
+	// Try in current namespace
+	if file.Namespace != "" {
+		fqn := file.Namespace + "\\" + name
+		if p.index.Lookup(fqn) != nil {
+			return fqn
+		}
+	}
+	// Try as global
+	if p.index.Lookup(name) != nil {
+		return name
+	}
+	// Fallback: search by short name
+	syms := p.index.LookupByName(name)
+	if best := symbols.PickBestStandalone(syms, name); best != nil {
+		return best.FQN
+	}
+	return name
+}
+
+// extractTrailingToken extracts the last variable or identifier token
+// from a string, handling method call chains by skipping parenthesized args.
+func extractTrailingToken(s string) string {
+	i := len(s)
+	// Skip trailing whitespace
+	for i > 0 && (s[i-1] == ' ' || s[i-1] == '\t') {
+		i--
+	}
+	if i == 0 {
+		return ""
+	}
+	// Skip closing paren (method chain: $foo->bar()-> )
+	if s[i-1] == ')' {
+		depth := 1
+		i--
+		for i > 0 && depth > 0 {
+			i--
+			if s[i] == ')' {
+				depth++
+			} else if s[i] == '(' {
+				depth--
+			}
+		}
+		for i > 0 && (s[i-1] == ' ' || s[i-1] == '\t') {
+			i--
+		}
+	}
+	// Extract the word
+	end := i
+	for i > 0 && isCompletionWordChar(s[i-1]) {
+		i--
+	}
+	if i > 0 && s[i-1] == '$' {
+		i--
+	}
+	if i >= end {
+		return ""
+	}
+	return s[i:end]
+}
+
+// extractNewClass extracts the class name from patterns like:
+// "new ClassName()", "(new ClassName())", "new ClassName", "(new ClassName)"
+func extractNewClass(s string) string {
+	t := strings.TrimSpace(s)
+
+	// Strip wrapping parens: "(new ClassName())" → "new ClassName()"
+	for strings.HasPrefix(t, "(") && strings.HasSuffix(t, ")") {
+		inner := t[1 : len(t)-1]
+		// Only strip if the parens are balanced wrapping parens (not constructor args)
+		if parenBalanced(inner) {
+			t = strings.TrimSpace(inner)
+		} else {
+			break
+		}
+	}
+
+	// Strip constructor args: "new ClassName(...)" → "new ClassName"
+	if strings.HasSuffix(t, ")") {
+		depth := 1
+		i := len(t) - 2
+		for i >= 0 && depth > 0 {
+			if t[i] == ')' {
+				depth++
+			} else if t[i] == '(' {
+				depth--
+			}
+			i--
+		}
+		t = strings.TrimSpace(t[:i+1])
+	}
+
+	// Extract class name after "new"
+	if idx := strings.LastIndex(t, "new "); idx >= 0 {
+		className := strings.TrimSpace(t[idx+4:])
+		if className != "" && !strings.ContainsAny(className, " \t(") {
+			return className
+		}
+	}
+	return ""
+}
+
+func parenBalanced(s string) bool {
+	depth := 0
+	for _, ch := range s {
+		if ch == '(' {
+			depth++
+		} else if ch == ')' {
+			depth--
+			if depth < 0 {
+				return false
+			}
+		}
+	}
+	return depth == 0
+}
+
+func isCompletionWordChar(ch byte) bool {
+	return (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || (ch >= '0' && ch <= '9') || ch == '_' || ch == '\\'
+}
+
+func findEnclosingClass(file *parser.FileNode, pos protocol.Position) string {
+	for _, cls := range file.Classes {
+		if pos.Line >= cls.StartLine {
+			if cls.FullName != "" {
+				return cls.FullName
+			}
+			if file.Namespace != "" {
+				return file.Namespace + "\\" + cls.Name
+			}
+			return cls.Name
+		}
+	}
+	return ""
 }
 
 func (p *Provider) completeNew(prefix, currentNS string) []protocol.CompletionItem {
@@ -131,17 +394,35 @@ func (p *Provider) completeNew(prefix, currentNS string) []protocol.CompletionIt
 }
 
 func (p *Provider) completeUse(prefix, currentNS string) []protocol.CompletionItem {
-	var items []protocol.CompletionItem
 	parts := strings.Fields(prefix)
-	ns := ""
+	search := ""
 	if len(parts) > 1 {
-		ns = parts[len(parts)-1]
+		search = parts[len(parts)-1]
 	}
-	for _, sym := range p.index.SearchByPrefix(ns) {
-		if sym.Kind == symbols.KindMethod || sym.Kind == symbols.KindProperty {
-			continue
+	// If typing a namespace path, use namespace-aware completion
+	if strings.Contains(search, "\\") {
+		return p.completeNamespacePath(search, currentNS)
+	}
+	// Otherwise show all top-level namespace segments + global symbols
+	var items []protocol.CompletionItem
+	_, nsSegs := p.index.SearchByFQNPrefix("")
+	for _, seg := range nsSegs {
+		if search == "" || strings.HasPrefix(strings.ToLower(seg), strings.ToLower(search)) {
+			items = append(items, protocol.CompletionItem{
+				Label:    seg,
+				Kind:     protocol.CompletionItemKindModule,
+				Detail:   seg,
+				SortText: "0" + seg,
+			})
 		}
-		items = append(items, protocol.CompletionItem{Label: sym.FQN, Kind: symKind(sym.Kind), Detail: sym.Name, SortText: sortPriority(sym, currentNS)})
+	}
+	if search != "" {
+		for _, sym := range p.index.SearchByPrefix(search) {
+			if sym.Kind == symbols.KindMethod || sym.Kind == symbols.KindProperty {
+				continue
+			}
+			items = append(items, protocol.CompletionItem{Label: sym.FQN, Kind: symKind(sym.Kind), Detail: sym.Name, SortText: sortPriority(sym, currentNS)})
+		}
 	}
 	return items
 }
@@ -182,6 +463,132 @@ func (p *Provider) completeContainerResolve() []protocol.CompletionItem {
 	return items
 }
 
+func (p *Provider) completeNamespacePath(search, currentNS string) []protocol.CompletionItem {
+	var items []protocol.CompletionItem
+
+	// Strip leading \ for absolute namespace paths
+	fqnPrefix := strings.TrimPrefix(search, "\\")
+
+	// Ensure trailing \ so we search within the namespace
+	if !strings.HasSuffix(fqnPrefix, "\\") {
+		// User is mid-segment: "Illuminate\Fo" → search prefix "Illuminate\" with filter "Fo"
+		if idx := strings.LastIndex(fqnPrefix, "\\"); idx >= 0 {
+			nsPrefix := fqnPrefix[:idx+1] // "Illuminate\"
+			filter := strings.ToLower(fqnPrefix[idx+1:])
+			syms, nsSegs := p.index.SearchByFQNPrefix(nsPrefix)
+
+			// Add matching namespace segments
+			for _, seg := range nsSegs {
+				if filter == "" || strings.HasPrefix(strings.ToLower(seg), filter) {
+					items = append(items, protocol.CompletionItem{
+						Label:    seg,
+						Kind:     protocol.CompletionItemKindModule,
+						Detail:   nsPrefix + seg,
+						SortText: "0" + seg,
+					})
+				}
+			}
+			// Add matching direct symbols
+			for _, sym := range syms {
+				if filter != "" && !strings.HasPrefix(strings.ToLower(sym.Name), filter) {
+					continue
+				}
+				item := protocol.CompletionItem{
+					Label:    sym.Name,
+					Kind:     symKind(sym.Kind),
+					Detail:   sym.FQN,
+					SortText: sortPriority(sym, currentNS),
+				}
+				if sym.Kind == symbols.KindFunction {
+					item.InsertText = sym.Name + "($0)"
+					item.InsertTextFormat = 2
+				}
+				items = append(items, item)
+			}
+			return items
+		}
+	}
+
+	// Exact namespace prefix with trailing \
+	syms, nsSegs := p.index.SearchByFQNPrefix(fqnPrefix)
+
+	// Add child namespace segments
+	for _, seg := range nsSegs {
+		items = append(items, protocol.CompletionItem{
+			Label:    seg,
+			Kind:     protocol.CompletionItemKindModule,
+			Detail:   fqnPrefix + seg,
+			SortText: "0" + seg,
+		})
+	}
+	// Add direct symbols in this namespace
+	for _, sym := range syms {
+		item := protocol.CompletionItem{
+			Label:    sym.Name,
+			Kind:     symKind(sym.Kind),
+			Detail:   sym.FQN,
+			SortText: sortPriority(sym, currentNS),
+		}
+		if sym.Kind == symbols.KindFunction {
+			item.InsertText = sym.Name + "($0)"
+			item.InsertTextFormat = 2
+		}
+		items = append(items, item)
+	}
+	return items
+}
+
+// detectMemberContext checks if the cursor is typing after -> or ::
+// e.g. "$foo->ba" returns ("$foo->", "ba"), "Foo::cr" returns ("Foo::", "cr").
+// Returns ("", "") if not in a member context.
+func detectMemberContext(trimmed string) (string, string) {
+	// Find the last -> or :: that has text after it (the partial member name)
+	for i := len(trimmed) - 1; i >= 2; i-- {
+		if trimmed[i-1] == '-' && trimmed[i] == '>' {
+			filter := trimmed[i+1:]
+			if filter != "" && !strings.ContainsAny(filter, " \t(=;,") {
+				return trimmed[:i+1], filter
+			}
+		}
+		if trimmed[i-1] == '?' && i >= 2 && trimmed[i] == '-' && i+1 < len(trimmed) && trimmed[i+1] == '>' {
+			filter := trimmed[i+2:]
+			if filter != "" && !strings.ContainsAny(filter, " \t(=;,") {
+				return trimmed[:i+2], filter
+			}
+		}
+		if trimmed[i-1] == ':' && trimmed[i] == ':' {
+			filter := trimmed[i+1:]
+			if filter != "" && !strings.ContainsAny(filter, " \t(=;,") {
+				return trimmed[:i+1], filter
+			}
+		}
+	}
+	return "", ""
+}
+
+func filterByPrefix(items []protocol.CompletionItem, prefix string) []protocol.CompletionItem {
+	if prefix == "" {
+		return items
+	}
+	lp := strings.ToLower(prefix)
+	var filtered []protocol.CompletionItem
+	for _, item := range items {
+		if strings.HasPrefix(strings.ToLower(item.Label), lp) {
+			filtered = append(filtered, item)
+		}
+	}
+	return filtered
+}
+
+func extractLastWord(prefix string) string {
+	trimmed := strings.TrimSpace(prefix)
+	words := strings.Fields(trimmed)
+	if len(words) == 0 {
+		return ""
+	}
+	return words[len(words)-1]
+}
+
 func (p *Provider) completeGlobal(prefix, currentNS string) []protocol.CompletionItem {
 	var items []protocol.CompletionItem
 	words := strings.Fields(strings.TrimSpace(prefix))
@@ -189,23 +596,47 @@ func (p *Provider) completeGlobal(prefix, currentNS string) []protocol.Completio
 	if len(words) > 0 {
 		search = words[len(words)-1]
 	}
-	for _, kw := range []string{"abstract", "class", "const", "enum", "extends", "final", "fn", "for", "foreach", "function", "if", "implements", "interface", "match", "namespace", "new", "private", "protected", "public", "readonly", "return", "static", "switch", "throw", "trait", "try", "use", "while", "yield"} {
-		if search == "" || strings.HasPrefix(kw, strings.ToLower(search)) {
+	lsearch := strings.ToLower(search)
+	// PHP primitive types — highest priority
+	for _, t := range []string{"string", "int", "float", "bool", "array", "object", "callable", "iterable", "void", "never", "null", "mixed", "self", "static", "true", "false"} {
+		if search == "" || strings.HasPrefix(t, lsearch) {
+			items = append(items, protocol.CompletionItem{Label: t, Kind: protocol.CompletionItemKindTypeParameter, SortText: "0" + t})
+		}
+	}
+	for _, kw := range []string{"abstract", "class", "const", "enum", "extends", "final", "fn", "for", "foreach", "function", "if", "implements", "interface", "match", "namespace", "new", "private", "protected", "public", "readonly", "return", "switch", "throw", "trait", "try", "use", "while", "yield"} {
+		if search == "" || strings.HasPrefix(kw, lsearch) {
 			items = append(items, protocol.CompletionItem{Label: kw, Kind: protocol.CompletionItemKindKeyword, SortText: "5" + kw})
 		}
 	}
-	if search != "" {
-		for _, sym := range p.index.SearchByPrefix(search) {
-			// Methods and properties only make sense after -> or ::
-			if sym.Kind == symbols.KindMethod || sym.Kind == symbols.KindProperty {
+	for _, sym := range p.index.SearchByPrefix(search) {
+		// In standalone context only show callable/referenceable symbols:
+		// functions, classes, interfaces, enums, traits
+		switch sym.Kind {
+		case symbols.KindFunction:
+			// Skip magic methods and namespaced functions that are likely
+			// class methods misidentified by the parser (real global helpers
+			// like collect(), config() have no namespace in their FQN)
+			if strings.HasPrefix(sym.Name, "__") {
+				continue
+			}
+			if sym.ParentFQN != "" {
+				continue
+			}
+			// Namespaced functions from vendor are almost always parser leaks
+			// (class methods that escaped their class body). Skip them unless
+			// they're from the project source.
+			if strings.Contains(sym.FQN, "\\") && sym.Source == symbols.SourceVendor {
 				continue
 			}
 			item := protocol.CompletionItem{Label: sym.Name, Kind: symKind(sym.Kind), Detail: sym.FQN, SortText: sortPriority(sym, currentNS)}
-			if sym.Kind == symbols.KindFunction {
-				item.InsertText = sym.Name + "($0)"
-				item.InsertTextFormat = 2
-			}
+			item.InsertText = sym.Name + "($0)"
+			item.InsertTextFormat = 2
 			items = append(items, item)
+		case symbols.KindClass, symbols.KindInterface, symbols.KindEnum, symbols.KindTrait:
+			// Only show type-level symbols when user is actively typing a name
+			if search != "" {
+				items = append(items, protocol.CompletionItem{Label: sym.Name, Kind: symKind(sym.Kind), Detail: sym.FQN, SortText: sortPriority(sym, currentNS)})
+			}
 		}
 	}
 	return items
@@ -215,7 +646,11 @@ func (p *Provider) resolveVariableType(source, varName string) string {
 	if varName == "$this" {
 		file := parser.ParseFile(source)
 		if file != nil && len(file.Classes) > 0 {
-			return file.Namespace + "\\" + file.Classes[0].Name
+			ns := file.Namespace
+			if ns != "" {
+				return ns + "\\" + file.Classes[0].Name
+			}
+			return file.Classes[0].Name
 		}
 		return ""
 	}
@@ -223,24 +658,80 @@ func (p *Provider) resolveVariableType(source, varName string) string {
 	if file == nil {
 		return ""
 	}
+	// 1. Check method/function parameters
 	for _, cls := range file.Classes {
 		for _, m := range cls.Methods {
 			for _, param := range m.Params {
 				if param.Name == varName && param.Type.Name != "" {
-					for _, u := range file.Uses {
-						if u.Alias == param.Type.Name {
-							return u.FullName
-						}
-					}
-					if file.Namespace != "" {
-						return file.Namespace + "\\" + param.Type.Name
-					}
-					return param.Type.Name
+					return p.resolveTypeWithFile(param.Type.Name, file)
 				}
 			}
 		}
 	}
+	for _, fn := range file.Functions {
+		for _, param := range fn.Params {
+			if param.Name == varName && param.Type.Name != "" {
+				return p.resolveTypeWithFile(param.Type.Name, file)
+			}
+		}
+	}
+	// 2. Check $var = new ClassName(...) assignments
+	bare := strings.TrimPrefix(varName, "$")
+	for _, line := range strings.Split(source, "\n") {
+		trimmed := strings.TrimSpace(line)
+		// Match: $var = new ClassName(
+		if strings.HasPrefix(trimmed, "$"+bare) {
+			rest := strings.TrimSpace(strings.TrimPrefix(trimmed, "$"+bare))
+			if strings.HasPrefix(rest, "=") {
+				rest = strings.TrimSpace(rest[1:])
+				if strings.HasPrefix(rest, "new ") {
+					className := strings.TrimSpace(rest[4:])
+					// Strip (args...) and trailing ;
+					if idx := strings.IndexByte(className, '('); idx >= 0 {
+						className = className[:idx]
+					}
+					className = strings.TrimSuffix(className, ";")
+					className = strings.TrimSpace(className)
+					if className != "" {
+						return p.resolveClassNameFromSource(className, source)
+					}
+				}
+			}
+		}
+	}
+	// 3. Check class properties
+	for _, cls := range file.Classes {
+		for _, prop := range cls.Properties {
+			if "$"+prop.Name == varName && prop.Type.Name != "" {
+				return p.resolveTypeWithFile(prop.Type.Name, file)
+			}
+		}
+	}
 	return ""
+}
+
+func (p *Provider) resolveTypeWithFile(typeName string, file *parser.FileNode) string {
+	if typeName == "" {
+		return ""
+	}
+	if strings.HasPrefix(typeName, "?") {
+		typeName = typeName[1:]
+	}
+	for _, u := range file.Uses {
+		if u.Alias == typeName {
+			return u.FullName
+		}
+	}
+	if file.Namespace != "" {
+		fqn := file.Namespace + "\\" + typeName
+		if p.index.Lookup(fqn) != nil {
+			return fqn
+		}
+	}
+	if p.index.Lookup(typeName) != nil {
+		return typeName
+	}
+	return typeName
 }
 
 func sortPriority(sym *symbols.Symbol, currentNS string) string {

@@ -32,6 +32,11 @@ func (p *Provider) GetHover(uri, source string, pos protocol.Position) *protocol
 		return nil
 	}
 
+	// No hover card for PHP primitive types (except self/static/parent which resolve to classes)
+	if symbols.IsPHPBuiltinType(word) && word != "self" && word != "static" && word != "parent" {
+		return nil
+	}
+
 	file := parser.ParseFile(source)
 
 	// Handle $variable hover
@@ -334,6 +339,51 @@ func (p *Provider) resolveVariableType(varName string, file *parser.FileNode, so
 		}
 	}
 
+	// 5. Infer type from literal assignments: $var = 'string', $var = 123, etc.
+	assignPattern := regexp.MustCompile(`\$` + regexp.QuoteMeta(bare) + `\s*=\s*(.+?)\s*;`)
+	for i := pos.Line; i >= 0 && i >= pos.Line-200; i-- {
+		if i >= len(lines) {
+			continue
+		}
+		if m := assignPattern.FindStringSubmatch(lines[i]); m != nil {
+			if t := inferLiteralType(strings.TrimSpace(m[1])); t != "" {
+				return t
+			}
+		}
+	}
+
+	return ""
+}
+
+// inferLiteralType returns the PHP type for a literal expression value.
+func inferLiteralType(expr string) string {
+	if expr == "" {
+		return ""
+	}
+	// String literals: '', "", heredoc
+	if (expr[0] == '\'' || expr[0] == '"') {
+		return "string"
+	}
+	// Boolean literals
+	lower := strings.ToLower(expr)
+	if lower == "true" || lower == "false" {
+		return "bool"
+	}
+	// Null
+	if lower == "null" {
+		return "null"
+	}
+	// Array literals: [], array()
+	if expr[0] == '[' || strings.HasPrefix(lower, "array(") {
+		return "array"
+	}
+	// Numeric: int or float
+	if expr[0] >= '0' && expr[0] <= '9' || expr[0] == '-' {
+		if strings.ContainsAny(expr, ".eE") {
+			return "float"
+		}
+		return "int"
+	}
 	return ""
 }
 
@@ -420,8 +470,7 @@ func (p *Provider) hoverVariable(file *parser.FileNode, source string, pos proto
 	typeName := p.resolveVariableType(varName, file, source, pos)
 	if typeName != "" {
 		var sb strings.Builder
-		sb.WriteString(fmt.Sprintf("**variable** `%s`\n\n", varName))
-		sb.WriteString(fmt.Sprintf("```php\n%s %s\n```\n", typeName, varName))
+		sb.WriteString(fmt.Sprintf("**%s**\n", varName))
 		if sym := p.index.Lookup(typeName); sym != nil {
 			if sym.DocComment != "" {
 				if doc := parser.ParseDocBlock(sym.DocComment); doc != nil && doc.Summary != "" {
@@ -429,6 +478,7 @@ func (p *Provider) hoverVariable(file *parser.FileNode, source string, pos proto
 				}
 			}
 		}
+		sb.WriteString(fmt.Sprintf("\n```php\n%s %s\n```\n", shortName(typeName), varName))
 		p.appendContainerBinding(&sb, typeName)
 		return &protocol.Hover{Contents: protocol.MarkupContent{Kind: "markdown", Value: sb.String()}}
 	}
@@ -443,8 +493,8 @@ func (p *Provider) hoverVariable(file *parser.FileNode, source string, pos proto
 						t = "mixed"
 					}
 					var sb strings.Builder
-					sb.WriteString(fmt.Sprintf("**parameter** `%s`\n\n", varName))
-					sb.WriteString(fmt.Sprintf("```php\n%s %s\n```\n", t, varName))
+					sb.WriteString(fmt.Sprintf("**%s**\n", varName))
+					sb.WriteString(fmt.Sprintf("\n```php\n%s %s\n```\n", t, varName))
 					p.appendContainerBinding(&sb, t)
 					return &protocol.Hover{Contents: protocol.MarkupContent{Kind: "markdown", Value: sb.String()}}
 				}
@@ -457,12 +507,19 @@ func (p *Provider) hoverVariable(file *parser.FileNode, source string, pos proto
 func (p *Provider) formatHover(sym *symbols.Symbol) string {
 	var sb strings.Builder
 
-	// === Header: kind label + FQN ===
+	// === 1. Header: bold FQN ===
+	sb.WriteString("**" + sym.FQN + "**\n")
+
+	// === 2. Summary (from docblock, shown right after header) ===
+	doc := p.getEffectiveDocBlock(sym)
+	if doc != nil && doc.Summary != "" {
+		sb.WriteString("\n" + doc.Summary + "\n")
+	}
+
+	// === 3. Code block: PHP declaration ===
+	sb.WriteString("\n```php\n")
 	switch sym.Kind {
 	case symbols.KindClass:
-		sb.WriteString(fmt.Sprintf("**class** `%s`\n\n", sym.FQN))
-		// Declaration with modifiers
-		sb.WriteString("```php\n")
 		if sym.IsFinal {
 			sb.WriteString("final ")
 		}
@@ -474,33 +531,19 @@ func (p *Provider) formatHover(sym *symbols.Symbol) string {
 		}
 		sb.WriteString("class " + sym.Name)
 		if sym.Extends != "" {
-			sb.WriteString(" extends " + sym.Extends)
+			sb.WriteString(" extends " + shortName(sym.Extends))
 		}
 		if len(sym.Implements) > 0 {
-			sb.WriteString(" implements " + strings.Join(sym.Implements, ", "))
-		}
-		sb.WriteString("\n```\n")
-		// Implemented by (for classes that act as base)
-		if impls := p.index.GetImplementors(sym.FQN); len(impls) > 0 {
-			sb.WriteString("\n**Implemented by:**\n")
-			for _, impl := range impls {
-				sb.WriteString(fmt.Sprintf("- `%s`\n", impl.FQN))
-			}
+			sb.WriteString(" implements " + joinShortNames(sym.Implements))
 		}
 
 	case symbols.KindInterface:
-		sb.WriteString(fmt.Sprintf("**interface** `%s`\n\n", sym.FQN))
-		sb.WriteString(fmt.Sprintf("```php\ninterface %s\n```\n", sym.Name))
-		if impls := p.index.GetImplementors(sym.FQN); len(impls) > 0 {
-			sb.WriteString("\n**Implementations:**\n")
-			for _, impl := range impls {
-				sb.WriteString(fmt.Sprintf("- `%s`\n", impl.FQN))
-			}
+		sb.WriteString("interface " + sym.Name)
+		if len(sym.Implements) > 0 {
+			sb.WriteString(" extends " + joinShortNames(sym.Implements))
 		}
 
 	case symbols.KindMethod:
-		sb.WriteString(fmt.Sprintf("**method** `%s`\n\n", sym.FQN))
-		sb.WriteString("```php\n")
 		vis := sym.Visibility
 		if vis == "" {
 			vis = "public"
@@ -519,22 +562,14 @@ func (p *Provider) formatHover(sym *symbols.Symbol) string {
 		if sym.ReturnType != "" {
 			sb.WriteString(": " + sym.ReturnType)
 		}
-		sb.WriteString("\n```\n")
-		// Override/implements detection
-		if sym.ParentFQN != "" {
-			p.appendMethodOrigin(&sb, sym)
-		}
 
 	case symbols.KindFunction:
-		sb.WriteString(fmt.Sprintf("**function** `%s`\n\n", sym.FQN))
-		sb.WriteString(fmt.Sprintf("```php\nfunction %s%s", sym.Name, fmtParams(sym.Params)))
+		sb.WriteString(fmt.Sprintf("function %s%s", sym.Name, fmtParams(sym.Params)))
 		if sym.ReturnType != "" {
 			sb.WriteString(": " + sym.ReturnType)
 		}
-		sb.WriteString("\n```\n")
 
 	case symbols.KindProperty:
-		sb.WriteString(fmt.Sprintf("**property** `%s`\n\n", sym.FQN))
 		vis := sym.Visibility
 		if vis == "" {
 			vis = "public"
@@ -543,69 +578,83 @@ func (p *Provider) formatHover(sym *symbols.Symbol) string {
 		if t == "" {
 			t = "mixed"
 		}
+		sb.WriteString(vis)
+		if sym.IsStatic {
+			sb.WriteString(" static")
+		}
+		if sym.IsReadonly {
+			sb.WriteString(" readonly")
+		}
 		propName := sym.Name
 		if !strings.HasPrefix(propName, "$") {
 			propName = "$" + propName
 		}
-		sb.WriteString(fmt.Sprintf("```php\n%s", vis))
-		if sym.IsStatic {
-			sb.WriteString(" static")
-		}
-		sb.WriteString(fmt.Sprintf(" %s %s\n```\n", t, propName))
-		if sym.ParentFQN != "" {
-			sb.WriteString(fmt.Sprintf("\nDefined in `%s`\n", sym.ParentFQN))
-		}
+		sb.WriteString(fmt.Sprintf(" %s %s", t, propName))
 
 	case symbols.KindEnum:
-		sb.WriteString(fmt.Sprintf("**enum** `%s`\n\n", sym.FQN))
-		sb.WriteString("```php\nenum " + sym.Name)
+		sb.WriteString("enum " + sym.Name)
 		if sym.BackedType != "" {
 			sb.WriteString(": " + sym.BackedType)
 		}
 		if len(sym.Implements) > 0 {
-			sb.WriteString(" implements " + strings.Join(sym.Implements, ", "))
+			sb.WriteString(" implements " + joinShortNames(sym.Implements))
 		}
-		sb.WriteString("\n```\n")
 
 	case symbols.KindEnumCase:
-		sb.WriteString(fmt.Sprintf("**case** `%s`\n\n", sym.FQN))
-		sb.WriteString("```php\ncase " + sym.Name)
+		sb.WriteString("case " + sym.Name)
 		if sym.Value != "" {
 			sb.WriteString(" = " + sym.Value)
-		}
-		sb.WriteString("\n```\n")
-		if sym.ParentFQN != "" {
-			sb.WriteString(fmt.Sprintf("\nDefined in `%s`\n", sym.ParentFQN))
 		}
 
 	case symbols.KindConstant:
-		sb.WriteString(fmt.Sprintf("**constant** `%s`\n\n", sym.FQN))
-		sb.WriteString("```php\nconst " + sym.Name)
+		sb.WriteString("const " + sym.Name)
 		if sym.Value != "" {
 			sb.WriteString(" = " + sym.Value)
 		}
-		sb.WriteString("\n```\n")
+
+	case symbols.KindTrait:
+		sb.WriteString("trait " + sym.Name)
+	}
+	sb.WriteString("\n```\n")
+
+	// === 4. Context line (parent class, override info) ===
+	switch sym.Kind {
+	case symbols.KindMethod:
+		if sym.ParentFQN != "" {
+			p.appendMethodOrigin(&sb, sym)
+		}
+	case symbols.KindProperty, symbols.KindConstant, symbols.KindEnumCase:
 		if sym.ParentFQN != "" {
 			sb.WriteString(fmt.Sprintf("\nDefined in `%s`\n", sym.ParentFQN))
 		}
-
-	case symbols.KindTrait:
-		sb.WriteString(fmt.Sprintf("**trait** `%s`\n\n", sym.FQN))
-		sb.WriteString(fmt.Sprintf("```php\ntrait %s\n```\n", sym.Name))
+	case symbols.KindClass:
+		if impls := p.index.GetImplementors(sym.FQN); len(impls) > 0 {
+			sb.WriteString("\n**Implemented by:** ")
+			names := make([]string, len(impls))
+			for i, impl := range impls {
+				names[i] = "`" + impl.FQN + "`"
+			}
+			sb.WriteString(strings.Join(names, ", ") + "\n")
+		}
+	case symbols.KindInterface:
+		if impls := p.index.GetImplementors(sym.FQN); len(impls) > 0 {
+			sb.WriteString("\n**Implementations:** ")
+			names := make([]string, len(impls))
+			for i, impl := range impls {
+				names[i] = "`" + impl.FQN + "`"
+			}
+			sb.WriteString(strings.Join(names, ", ") + "\n")
+		}
 	}
 
-	// === DocBlock section ===
-	doc := p.getEffectiveDocBlock(sym)
+	// === 5. Extended docblock details ===
 	if doc != nil {
-		if doc.Summary != "" {
-			sb.WriteString("\n" + doc.Summary + "\n")
-		}
 		if doc.Deprecated {
 			msg := doc.DeprecatedMsg
 			if msg == "" {
 				msg = "This symbol is deprecated."
 			}
-			sb.WriteString(fmt.Sprintf("\n**⚠ Deprecated:** %s\n", msg))
+			sb.WriteString(fmt.Sprintf("\n**Deprecated:** %s\n", msg))
 		}
 		if len(doc.Params) > 0 {
 			sb.WriteString("\n**Params**\n")
@@ -640,7 +689,6 @@ func (p *Provider) formatHover(sym *symbols.Symbol) string {
 				sb.WriteString(line + "\n")
 			}
 		}
-		// Show @template, @mixin, @see, @property-* from tags
 		for _, tagName := range []string{"template", "mixin", "see", "property", "property-read", "property-write", "method"} {
 			if vals, ok := doc.Tags[tagName]; ok && len(vals) > 0 {
 				label := "@" + tagName
@@ -651,18 +699,33 @@ func (p *Provider) formatHover(sym *symbols.Symbol) string {
 		}
 	}
 
-	// === Container binding (interface/class) ===
+	// === 6. Container binding ===
 	switch sym.Kind {
 	case symbols.KindInterface, symbols.KindClass:
 		p.appendContainerBinding(&sb, sym.FQN)
 	}
 
-	// === PHP Manual link ===
+	// === 7. PHP Manual link ===
 	if url := phpManualURL(sym); url != "" {
 		sb.WriteString(fmt.Sprintf("\n[PHP Manual](%s)\n", url))
 	}
 
 	return sb.String()
+}
+
+func shortName(fqn string) string {
+	if i := strings.LastIndex(fqn, "\\"); i >= 0 {
+		return fqn[i+1:]
+	}
+	return fqn
+}
+
+func joinShortNames(fqns []string) string {
+	names := make([]string, len(fqns))
+	for i, fqn := range fqns {
+		names[i] = shortName(fqn)
+	}
+	return strings.Join(names, ", ")
 }
 
 // appendContainerBinding adds container binding info if available.

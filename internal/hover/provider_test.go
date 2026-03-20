@@ -175,8 +175,11 @@ func TestHoverVariableWithTypeHint(t *testing.T) {
 		t.Fatal("expected hover result")
 	}
 	val := hover.Contents.Value
-	if !strings.Contains(val, "Monolog\\Logger") {
-		t.Errorf("expected FQN type, got:\n%s", val)
+	if !strings.Contains(val, "**$logger**") {
+		t.Errorf("expected bold variable header, got:\n%s", val)
+	}
+	if !strings.Contains(val, "Logger $logger") {
+		t.Errorf("expected type and variable in code block, got:\n%s", val)
 	}
 }
 
@@ -189,8 +192,8 @@ func TestHoverClassInUseStatement(t *testing.T) {
 		t.Fatal("expected hover result")
 	}
 	val := hover.Contents.Value
-	if !strings.Contains(val, "**class** `Monolog\\Logger`") {
-		t.Errorf("expected class info, got:\n%s", val)
+	if !strings.Contains(val, "**Monolog\\Logger**") {
+		t.Errorf("expected class FQN header, got:\n%s", val)
 	}
 }
 
@@ -203,8 +206,8 @@ func TestHoverClassNameInTypeDecl(t *testing.T) {
 		t.Fatal("expected hover result")
 	}
 	val := hover.Contents.Value
-	if !strings.Contains(val, "**class** `Monolog\\Logger`") {
-		t.Errorf("expected class info, got:\n%s", val)
+	if !strings.Contains(val, "**Monolog\\Logger**") {
+		t.Errorf("expected class FQN header, got:\n%s", val)
 	}
 }
 
@@ -234,8 +237,8 @@ func TestHoverNewExpression(t *testing.T) {
 		t.Fatal("expected hover result")
 	}
 	val := hover.Contents.Value
-	if !strings.Contains(val, "**class** `Monolog\\Handler\\StreamHandler`") {
-		t.Errorf("expected class info, got:\n%s", val)
+	if !strings.Contains(val, "**Monolog\\Handler\\StreamHandler**") {
+		t.Errorf("expected class FQN header, got:\n%s", val)
 	}
 }
 
@@ -258,9 +261,9 @@ func TestHoverRichCardStructure(t *testing.T) {
 		t.Fatal("expected hover result")
 	}
 	val := hover.Contents.Value
-	// Should have kind header
-	if !strings.Contains(val, "**method**") {
-		t.Errorf("expected method kind header, got:\n%s", val)
+	// Should have FQN header
+	if !strings.Contains(val, "**Monolog\\Logger::info**") {
+		t.Errorf("expected FQN header, got:\n%s", val)
 	}
 	// Should have code block with function signature
 	if !strings.Contains(val, "```php") {
@@ -298,11 +301,8 @@ class Service {
 		t.Fatal("expected hover for self keyword")
 	}
 	val := hover.Contents.Value
-	if !strings.Contains(val, "**class**") {
-		t.Errorf("expected class hover for self, got:\n%s", val)
-	}
-	if !strings.Contains(val, "App\\Service") {
-		t.Errorf("expected App\\Service FQN, got:\n%s", val)
+	if !strings.Contains(val, "**App\\Service**") {
+		t.Errorf("expected App\\Service FQN header, got:\n%s", val)
 	}
 }
 
@@ -314,9 +314,9 @@ func TestHoverVariableRichCard(t *testing.T) {
 		t.Fatal("expected hover result")
 	}
 	val := hover.Contents.Value
-	// Variable hover should have kind label
-	if !strings.Contains(val, "**variable**") && !strings.Contains(val, "**parameter**") {
-		t.Errorf("expected variable/parameter kind header, got:\n%s", val)
+	// Variable hover should have bold variable name header
+	if !strings.Contains(val, "**$logger**") {
+		t.Errorf("expected bold variable name header, got:\n%s", val)
 	}
 }
 
@@ -331,8 +331,8 @@ strlen("hello");
 		t.Fatal("expected hover for strlen")
 	}
 	val := hover.Contents.Value
-	if !strings.Contains(val, "**function**") {
-		t.Errorf("expected function kind header, got:\n%s", val)
+	if !strings.Contains(val, "**strlen**") {
+		t.Errorf("expected bold FQN header, got:\n%s", val)
 	}
 	if !strings.Contains(val, "php.net") {
 		t.Errorf("expected PHP manual link, got:\n%s", val)
@@ -388,8 +388,8 @@ enum Status: string {
 		t.Fatal("expected enum to be indexed")
 	}
 	content := p.formatHover(sym)
-	if !strings.Contains(content, "**enum**") {
-		t.Errorf("expected enum kind header, got:\n%s", content)
+	if !strings.Contains(content, "**App\\Status**") {
+		t.Errorf("expected bold FQN header, got:\n%s", content)
 	}
 	if !strings.Contains(content, ": string") {
 		t.Errorf("expected backed type in declaration, got:\n%s", content)
@@ -413,8 +413,8 @@ class Config {
 		t.Fatal("expected constant to be indexed")
 	}
 	content := p.formatHover(sym)
-	if !strings.Contains(content, "**constant**") {
-		t.Errorf("expected constant kind header, got:\n%s", content)
+	if !strings.Contains(content, "**App\\Config::VERSION**") {
+		t.Errorf("expected bold FQN header, got:\n%s", content)
 	}
 	if !strings.Contains(content, "'1.0.0'") {
 		t.Errorf("expected constant value, got:\n%s", content)
@@ -460,10 +460,11 @@ class UserController {
 	}
 	val := hover.Contents.Value
 	// Should show the global function, not the class method
-	if !strings.Contains(val, "**function**") {
-		t.Errorf("expected function kind (not method), got:\n%s", val)
+	// The FQN for a global function is just the name, while a method would be Class::method
+	if !strings.Contains(val, "**request**") {
+		t.Errorf("expected bold function name header, got:\n%s", val)
 	}
-	if strings.Contains(val, "**method**") {
+	if strings.Contains(val, "Illuminate\\Http\\Request::request") {
 		t.Errorf("should NOT show method hover for standalone request(), got:\n%s", val)
 	}
 }
@@ -489,8 +490,8 @@ request();
 	}
 	val := hover.Contents.Value
 	// Should prefer the exact case match "request" over "Request"
-	if !strings.Contains(val, "`request`") {
-		t.Errorf("expected exact case match 'request', got:\n%s", val)
+	if !strings.Contains(val, "**request**") {
+		t.Errorf("expected exact case match 'request' in header, got:\n%s", val)
 	}
 }
 
@@ -511,8 +512,55 @@ abstract class BaseService {
 		t.Fatal("expected class to be indexed")
 	}
 	content := p.formatHover(sym)
+	if !strings.Contains(content, "**App\\BaseService**") {
+		t.Errorf("expected bold FQN header, got:\n%s", content)
+	}
 	if !strings.Contains(content, "abstract class") {
-		t.Errorf("expected abstract modifier, got:\n%s", content)
+		t.Errorf("expected abstract modifier in code block, got:\n%s", content)
+	}
+}
+
+func TestHoverVariableWithBuiltinType(t *testing.T) {
+	idx := symbols.NewIndex()
+	idx.RegisterBuiltins()
+	ca := container.NewContainerAnalyzer(idx, "/tmp", "none")
+	p := NewProvider(idx, ca, "none")
+
+	source := `<?php
+namespace App;
+
+class Foo {
+    public function bar(string $name, int $count, ?array $items): void {
+        $name;
+        $count;
+        $items;
+    }
+}
+`
+	tests := []struct {
+		varName  string
+		lineHint string
+		wantType string
+	}{
+		{"$name", "$name;", "string"},
+		{"$count", "$count;", "int"},
+		{"$items", "$items;", "array"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.varName, func(t *testing.T) {
+			pos := charPosOf(t, source, tt.varName, tt.lineHint)
+			hover := p.GetHover("file:///test.php", source, pos)
+			if hover == nil {
+				t.Fatalf("expected hover for %s", tt.varName)
+			}
+			val := hover.Contents.Value
+			if !strings.Contains(val, "**"+tt.varName+"**") {
+				t.Errorf("expected bold variable header, got:\n%s", val)
+			}
+			if !strings.Contains(val, tt.wantType+" "+tt.varName) {
+				t.Errorf("expected '%s %s' in code block, got:\n%s", tt.wantType, tt.varName, val)
+			}
+		})
 	}
 }
 

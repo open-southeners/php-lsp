@@ -123,10 +123,16 @@ func (r *phpstanRunner) analyze(filePath string) []protocol.Diagnostic {
 		}
 	}
 
-	return r.parseOutput(output)
+	// Read source lines so we can compute accurate diagnostic ranges
+	var lines []string
+	if src, err := os.ReadFile(filePath); err == nil {
+		lines = strings.Split(string(src), "\n")
+	}
+
+	return r.parseOutput(output, lines)
 }
 
-func (r *phpstanRunner) parseOutput(data []byte) []protocol.Diagnostic {
+func (r *phpstanRunner) parseOutput(data []byte, sourceLines []string) []protocol.Diagnostic {
 	jsonData := extractJSON(data)
 	if jsonData == nil {
 		return nil
@@ -151,10 +157,12 @@ func (r *phpstanRunner) parseOutput(data []byte) []protocol.Diagnostic {
 				code = "phpstan"
 			}
 
+			startCol, endCol := diagnosticRange(sourceLines, line, msg.Message)
+
 			diags = append(diags, protocol.Diagnostic{
 				Range: protocol.Range{
-					Start: protocol.Position{Line: line, Character: 0},
-					End:   protocol.Position{Line: line, Character: 0},
+					Start: protocol.Position{Line: line, Character: startCol},
+					End:   protocol.Position{Line: line, Character: endCol},
 				},
 				Severity: protocol.DiagnosticSeverityError,
 				Source:   "phpstan",
@@ -165,6 +173,81 @@ func (r *phpstanRunner) parseOutput(data []byte) []protocol.Diagnostic {
 	}
 
 	return diags
+}
+
+// diagnosticRange computes the start and end columns for a diagnostic on a line.
+// It tries to find the specific identifier mentioned in the PHPStan message,
+// falling back to highlighting the trimmed line content.
+func diagnosticRange(lines []string, line int, message string) (int, int) {
+	if line < 0 || line >= len(lines) {
+		return 0, 0
+	}
+	src := lines[line]
+
+	// Try to extract a symbol name from common PHPStan message patterns and
+	// highlight just that symbol on the line.
+	candidates := extractMessageIdentifiers(message)
+	for _, candidate := range candidates {
+		if col := strings.Index(src, candidate); col >= 0 {
+			return col, col + len(candidate)
+		}
+	}
+
+	// Fallback: highlight the trimmed content of the line
+	startCol := len(src) - len(strings.TrimLeft(src, " \t"))
+	endCol := len(strings.TrimRight(src, " \t\r\n"))
+	if endCol <= startCol {
+		return 0, len(src)
+	}
+	return startCol, endCol
+}
+
+// extractMessageIdentifiers pulls identifiable symbols from PHPStan messages.
+// Common patterns: "Function foo not found", "Call to method bar() on ...",
+// "Access to property $baz on ...", "Class Foo\Bar not found", etc.
+func extractMessageIdentifiers(msg string) []string {
+	var candidates []string
+	patterns := []struct {
+		prefix string
+		suffix string
+	}{
+		{"Function ", " not found"},
+		{"Call to method ", "("},
+		{"Call to static method ", "("},
+		{"Call to undefined method ", "("},
+		{"Access to an undefined property ", "."},
+		{"Access to property ", " on"},
+		{"Class ", " not found"},
+		{"Instantiation of class ", " "},
+		{"Property ", " ("},
+		{"Variable $", " "},
+		{"Constant ", " not found"},
+		{"Method ", " "},
+		{"Parameter $", " "},
+		{"Parameter #", " "},
+	}
+	for _, p := range patterns {
+		idx := strings.Index(msg, p.prefix)
+		if idx < 0 {
+			continue
+		}
+		rest := msg[idx+len(p.prefix):]
+		if p.suffix != "" {
+			if end := strings.Index(rest, p.suffix); end > 0 {
+				name := rest[:end]
+				// For methods like "Foo::bar", extract just "bar"
+				if sepIdx := strings.LastIndex(name, "::"); sepIdx >= 0 {
+					candidates = append(candidates, name[sepIdx+2:])
+				}
+				// For properties, keep $prefix
+				if strings.HasPrefix(p.prefix, "Variable ") || strings.HasPrefix(p.prefix, "Parameter $") {
+					name = "$" + name
+				}
+				candidates = append(candidates, name)
+			}
+		}
+	}
+	return candidates
 }
 
 // extractJSON finds the first JSON object in data, skipping any preamble.

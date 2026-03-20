@@ -1288,18 +1288,39 @@ func (p *structParser) parseParams() []ParamDef {
 }
 
 func (p *structParser) readTypeName() string {
+	// Handle nullable prefix
+	nullable := ""
+	if p.peek().Kind == TokenQuestion {
+		nullable = "?"
+		p.advance()
+	}
 	var parts []string
 	for {
 		t := p.peek()
-		if t.Kind == TokenIdentifier {
+		if t.Kind == TokenIdentifier || isTypeKeyword(t.Kind) {
 			parts = append(parts, t.Value)
 			p.advance()
 		} else if t.Kind == TokenBackslash {
 			parts = append(parts, "\\")
 			p.advance()
+		} else if t.Kind == TokenPipe || t.Kind == TokenAmpersand {
+			// Union (A|B) or intersection (A&B) types
+			parts = append(parts, t.Value)
+			p.advance()
 		} else {
 			break
 		}
 	}
-	return strings.Join(parts, "")
+	return nullable + strings.Join(parts, "")
+}
+
+// isTypeKeyword returns true for keyword tokens that are valid as type names
+// in PHP (self, static, parent, array, callable, etc.) but NOT structural
+// keywords like class, extends, implements, function, etc.
+func isTypeKeyword(kind TokenKind) bool {
+	switch kind {
+	case TokenStatic, TokenConst:
+		return true
+	}
+	return false
 }

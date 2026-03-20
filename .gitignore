@@ -5,3 +5,5 @@ node_modules/
 out/
 target/
 .vscode-test/
+plans/
+.DS_Store
