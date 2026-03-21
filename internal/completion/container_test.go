@@ -661,3 +661,148 @@ class TestController {
 		}
 	}
 }
+
+// --- Eloquent model static method and variable resolution tests ---
+
+func TestEloquentStaticMethodCompletion(t *testing.T) {
+	idx := symbols.NewIndex()
+	idx.RegisterBuiltins()
+
+	// Minimal Eloquent stubs
+	idx.IndexFile("file:///vendor/Model.php", `<?php
+namespace Illuminate\Database\Eloquent;
+abstract class Model {
+    public function save(): bool { return true; }
+    public function delete(): bool { return true; }
+    public function toArray(): array { return []; }
+}
+`)
+	idx.IndexFile("file:///vendor/Builder.php", `<?php
+namespace Illuminate\Database\Eloquent;
+class Builder {
+    public function where($column, $operator = null, $value = null): static { return $this; }
+    public function first(): ?Model { return null; }
+    public function get(): Collection { return new Collection(); }
+    public function with($relations): static { return $this; }
+}
+`)
+	idx.IndexFile("file:///vendor/Collection.php", `<?php
+namespace Illuminate\Database\Eloquent;
+class Collection {
+    public function count(): int { return 0; }
+    public function first(): ?Model { return null; }
+}
+`)
+
+	// User model
+	idx.IndexFile("file:///app/Models/User.php", `<?php
+namespace App\Models;
+use Illuminate\Database\Eloquent\Model;
+class User extends Model {
+    public string $email;
+}
+`)
+
+	// Run eloquent analyzer to inject static methods
+	models_pkg_AnalyzeEloquentModels(idx)
+
+	p := NewProvider(idx, nil, "laravel")
+
+	t.Run("User:: shows static Builder methods", func(t *testing.T) {
+		source := "<?php\nuse App\\Models\\User;\nUser::"
+		items := p.GetCompletions("file:///test.php", source, protocol.Position{Line: 2, Character: 6})
+		labels := collectLabels(items)
+
+		for _, method := range []string{"find", "first", "where", "all", "create", "query"} {
+			if !labels[method] {
+				t.Errorf("expected static method %q in User::, got %d items: %v", method, len(items), labels)
+			}
+		}
+	})
+
+	t.Run("User::query()-> shows Builder methods", func(t *testing.T) {
+		source := "<?php\nuse App\\Models\\User;\nUser::query()->"
+		items := p.GetCompletions("file:///test.php", source, protocol.Position{Line: 2, Character: 15})
+		labels := collectLabels(items)
+
+		if !labels["where"] {
+			t.Errorf("expected 'where' from Builder via User::query()->, got labels: %v", labels)
+		}
+		if !labels["first"] {
+			t.Errorf("expected 'first' from Builder, got labels: %v", labels)
+		}
+	})
+
+	t.Run("$user = User::first(); $user-> shows model properties", func(t *testing.T) {
+		source := `<?php
+use App\Models\User;
+$user = User::first();
+$user->`
+		items := p.GetCompletions("file:///test.php", source, protocol.Position{Line: 3, Character: 7})
+		labels := collectLabels(items)
+
+		if !labels["email"] {
+			t.Errorf("expected 'email' property from User model after User::first(), got labels: %v", labels)
+		}
+		if !labels["save"] {
+			t.Errorf("expected 'save' method from Model base class, got labels: %v", labels)
+		}
+	})
+
+	t.Run("$user = User::find(1); $user-> shows model properties", func(t *testing.T) {
+		source := `<?php
+use App\Models\User;
+$user = User::find(1);
+$user->`
+		items := p.GetCompletions("file:///test.php", source, protocol.Position{Line: 3, Character: 7})
+		labels := collectLabels(items)
+
+		if !labels["email"] {
+			t.Errorf("expected 'email' after User::find(1), got labels: %v", labels)
+		}
+	})
+}
+
+// models_pkg_AnalyzeEloquentModels is a helper that calls the models package analyzer.
+// Since we can't import models from the completion package (circular dep potential),
+// we replicate the essential behavior: injecting static method forwards on Model descendants.
+func models_pkg_AnalyzeEloquentModels(index *symbols.Index) {
+	eloquentStaticForwards := []struct {
+		name       string
+		returnType string
+		params     []symbols.ParamInfo
+	}{
+		{"query", "Illuminate\\Database\\Eloquent\\Builder", nil},
+		{"find", "static", []symbols.ParamInfo{{Name: "$id", Type: "mixed"}}},
+		{"first", "static", nil},
+		{"firstOrFail", "static", nil},
+		{"create", "static", []symbols.ParamInfo{{Name: "$attributes", Type: "array"}}},
+		{"all", "Illuminate\\Database\\Eloquent\\Collection", nil},
+		{"where", "Illuminate\\Database\\Eloquent\\Builder", []symbols.ParamInfo{{Name: "$column", Type: "mixed"}}},
+		{"with", "Illuminate\\Database\\Eloquent\\Builder", []symbols.ParamInfo{{Name: "$relations", Type: "mixed"}}},
+	}
+
+	models := index.GetDescendants("Illuminate\\Database\\Eloquent\\Model")
+	for _, model := range models {
+		for _, m := range eloquentStaticForwards {
+			if index.Lookup(model.FQN+"::"+m.name) != nil {
+				continue
+			}
+			retType := m.returnType
+			if retType == "static" {
+				retType = model.FQN
+			}
+			index.AddVirtualMember(model.FQN, &symbols.Symbol{
+				Name:       m.name,
+				FQN:        model.FQN + "::" + m.name,
+				Kind:       symbols.KindMethod,
+				URI:        model.URI,
+				Visibility: "public",
+				IsStatic:   true,
+				ReturnType: retType,
+				Params:     m.params,
+				IsVirtual:  true,
+			})
+		}
+	}
+}

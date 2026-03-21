@@ -21,7 +21,25 @@ type Provider struct {
 }
 
 func NewProvider(index *symbols.Index, ca *container.ContainerAnalyzer, framework string) *Provider {
-	return &Provider{index: index, container: ca, resolver: resolve.NewResolver(index), framework: framework}
+	p := &Provider{index: index, container: ca, resolver: resolve.NewResolver(index), framework: framework}
+	// Wire up chain resolution so ResolveVariableType can handle $var = Class::method()->chain()
+	p.resolver.ChainResolver = p.resolveExpressionType
+	return p
+}
+
+// resolveExpressionType resolves the type of an expression like "Category::first()"
+// or "$foo->bar()->baz()". Used as the ChainResolver callback.
+func (p *Provider) resolveExpressionType(expr string, source string, pos protocol.Position, file *parser.FileNode) string {
+	expr = strings.TrimSpace(expr)
+	if expr == "" {
+		return ""
+	}
+	// Append a dummy "->" so resolveAccessChain can walk the chain up to the last member
+	// and return the type of the final call/access.
+	dummyLine := expr + "->__dummy__"
+	// wordStart points to "__dummy__" which is after "->"
+	wordStart := len(expr) + 2
+	return p.resolveAccessChain(dummyLine, wordStart, source, pos, file)
 }
 
 // SetArrayResolver sets the framework array resolver for config/request/model key completion.
@@ -86,6 +104,12 @@ func (p *Provider) GetCompletions(uri, source string, pos protocol.Position) []p
 	if len(words) >= 1 && words[0] == "use" {
 		currentNS := extractNamespace(source)
 		return p.completeUse(prefix, currentNS)
+	}
+	// Builder column/relation argument completion: ->where('col, ->with('rel
+	if method, partial, quote, ok := extractBuilderArgContext(trimmed); ok {
+		if items := p.completeBuilderArg(method, partial, quote, prefix, source, pos, file); items != nil {
+			return items
+		}
 	}
 	// Array key completion: $var['partial or $var['key1']['partial (nested)
 	if ctx := parseArrayKeyContext(prefix); ctx != nil {

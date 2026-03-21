@@ -15,6 +15,10 @@ import (
 // Resolver provides shared resolution methods that depend on the symbol index.
 type Resolver struct {
 	Index *symbols.Index
+	// ChainResolver is an optional callback to resolve method chain expressions
+	// like "Category::first()" or "$foo->bar()->baz()". Set by the completion/hover
+	// provider that has access to the full chain resolution logic.
+	ChainResolver func(expr string, source string, pos protocol.Position, file *parser.FileNode) string
 }
 
 // NewResolver creates a resolver with the given symbol index.
@@ -235,6 +239,12 @@ func (r *Resolver) ResolveVariableType(varName string, lines []string, pos proto
 		rhs = strings.TrimSpace(rhs)
 		if t := InferLiteralType(rhs); t != "" {
 			return t
+		}
+		// $var = ClassName::method() or $var = $foo->bar()->baz()
+		if r.ChainResolver != nil && (strings.Contains(rhs, "->") || strings.Contains(rhs, "::")) {
+			if t := r.ChainResolver(rhs, strings.Join(lines, "\n"), pos, file); t != "" {
+				return t
+			}
 		}
 	}
 
