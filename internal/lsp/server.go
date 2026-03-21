@@ -293,8 +293,12 @@ func (s *Server) handleInitialized(msg *jsonRPCMessage) {
 		if s.framework == "symfony" {
 			models.AnalyzeDoctrineEntities(s.index, s.rootPath)
 		}
-		// Database schema introspection runs last — other sources get priority
+		// Database schema introspection runs after model analysis — other sources get priority
 		models.AnalyzeDatabaseSchema(s.index, s.rootPath, s.framework, s.cfg, s.logger, s.schemaCache)
+		// Migration analysis is the last resort fallback
+		if s.framework == "laravel" {
+			models.AnalyzeMigrations(s.index, s.rootPath)
+		}
 	})
 }
 
