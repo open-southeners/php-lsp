@@ -672,6 +672,54 @@ func (idx *Index) GetInheritanceChain(classFQN string) []string {
 	return chain
 }
 
+// GetDescendants returns all classes that directly or indirectly extend baseFQN.
+func (idx *Index) GetDescendants(baseFQN string) []*Symbol {
+	idx.mu.RLock()
+	defer idx.mu.RUnlock()
+	var results []*Symbol
+	for childFQN, parentFQN := range idx.inheritanceMap {
+		if idx.isDescendantOf(childFQN, baseFQN, make(map[string]bool)) {
+			if sym, ok := idx.symbols[childFQN]; ok {
+				results = append(results, sym)
+			}
+		}
+		_ = parentFQN
+	}
+	return results
+}
+
+func (idx *Index) isDescendantOf(fqn, baseFQN string, visited map[string]bool) bool {
+	if visited[fqn] {
+		return false
+	}
+	visited[fqn] = true
+	parent, ok := idx.inheritanceMap[fqn]
+	if !ok || parent == "" {
+		return false
+	}
+	if parent == baseFQN {
+		return true
+	}
+	return idx.isDescendantOf(parent, baseFQN, visited)
+}
+
+// AddVirtualMember adds a virtual member to an existing class symbol.
+// Thread-safe — acquires the write lock.
+func (idx *Index) AddVirtualMember(parentFQN string, member *Symbol) {
+	idx.mu.Lock()
+	defer idx.mu.Unlock()
+	if idx.symbols[member.FQN] != nil {
+		return // already exists
+	}
+	parent := idx.symbols[parentFQN]
+	if parent == nil {
+		return
+	}
+	member.ParentFQN = parentFQN
+	parent.Children = append(parent.Children, member)
+	idx.addSymbol(member.URI, member)
+}
+
 func (idx *Index) GetImplementors(ifaceFQN string) []*Symbol {
 	idx.mu.RLock()
 	defer idx.mu.RUnlock()

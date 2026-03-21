@@ -47,6 +47,7 @@ type MethodNode struct {
 	DocComment string
 	StartLine  int
 	StartCol   int
+	EndLine    int
 }
 
 type ConstantNode struct {
@@ -539,6 +540,7 @@ func toMethodNode(result *ParseResult, methodDef MethodDef) MethodNode {
 		DocComment: methodDef.DocComment,
 		StartLine:  methodDef.Line,
 		StartCol:   startColumnForDeclaration(result, methodDef.Name, methodDef.Line, TokenFunction),
+		EndLine:    methodDef.EndLine,
 	}
 	for _, paramDef := range methodDef.Params {
 		methodNode.Params = append(methodNode.Params, toParamNode(paramDef))
