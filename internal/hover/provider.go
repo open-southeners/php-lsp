@@ -23,7 +23,20 @@ type Provider struct {
 }
 
 func NewProvider(index *symbols.Index, ca *container.ContainerAnalyzer, framework string) *Provider {
-	return &Provider{index: index, container: ca, resolver: resolve.NewResolver(index), framework: framework}
+	p := &Provider{index: index, container: ca, resolver: resolve.NewResolver(index), framework: framework}
+	p.resolver.ChainResolver = p.resolveExpressionType
+	return p
+}
+
+// resolveExpressionType resolves the type of a chain expression like "Category::first()".
+func (p *Provider) resolveExpressionType(expr string, source string, pos protocol.Position, file *parser.FileNode) string {
+	expr = strings.TrimSpace(expr)
+	if expr == "" {
+		return ""
+	}
+	dummyLine := expr + "->__dummy__"
+	wordStart := len(expr) + 2
+	return p.resolveAccessChain(dummyLine, wordStart, strings.Split(source, "\n"), pos, file)
 }
 
 // SetArrayResolver sets the framework array resolver for config hover.
@@ -105,6 +118,9 @@ func (p *Provider) GetHover(uri, source string, pos protocol.Position) *protocol
 				return &protocol.Hover{Contents: protocol.MarkupContent{Kind: "markdown", Value: content}}
 			}
 		}
+		// Member not found on the resolved class — don't fall through to
+		// standalone lookups which would show unrelated symbols with the same name.
+		return nil
 	}
 
 	// Resolve the word via use statements

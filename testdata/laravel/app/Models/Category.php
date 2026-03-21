@@ -3,14 +3,15 @@
 namespace App\Models;
 
 use Illuminate\Database\Eloquent\Model;
+use Illuminate\Database\Eloquent\Relations\HasMany;
 
 class Category extends Model
 {
     public string $name;
     public string $slug;
 
-    public function products(): array
+    public function products(): HasMany
     {
-        return [];
+        return $this->hasMany(Product::class);
     }
 }
