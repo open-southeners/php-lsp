@@ -272,9 +272,24 @@ func (s *Server) handleInitialize(msg *jsonRPCMessage) {
 }
 
 func (s *Server) handleInitialized(msg *jsonRPCMessage) {
-	s.goSafe("indexWorkspace", s.indexWorkspace)
-	s.goSafe("indexComposerDeps", s.indexComposerDependencies)
+	var indexWg sync.WaitGroup
+	indexWg.Add(2)
+	s.goSafe("indexWorkspace", func() {
+		defer indexWg.Done()
+		s.indexWorkspace()
+	})
+	s.goSafe("indexComposerDeps", func() {
+		defer indexWg.Done()
+		s.indexComposerDependencies()
+	})
 	s.goSafe("container.Analyze", s.container.Analyze)
+	// Run model analysis after both workspace and vendor indexing complete
+	s.goSafe("analyzeModels", func() {
+		indexWg.Wait()
+		if s.framework == "laravel" {
+			models.AnalyzeEloquentModels(s.index, s.rootPath)
+		}
+	})
 }
 
 func (s *Server) handleDidOpen(msg *jsonRPCMessage) {
