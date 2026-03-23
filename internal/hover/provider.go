@@ -377,6 +377,9 @@ func (p *Provider) formatHover(sym *symbols.Symbol) string {
 
 // appendContainerBinding adds container binding info if available.
 func (p *Provider) appendContainerBinding(sb *strings.Builder, fqn string) {
+	if p.container == nil {
+		return
+	}
 	if binding := p.container.ResolveDependency(fqn); binding != nil {
 		sb.WriteString(fmt.Sprintf("\n---\n**Container Binding**\n- Concrete: `%s`\n- Singleton: %v\n", binding.Concrete, binding.Singleton))
 	}
