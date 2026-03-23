@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-03-23
+
 ### Added
 
 - Multi-source model attribute discovery for Eloquent and Doctrine ORM models.
@@ -25,6 +27,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Strict DB-only column filtering for `get()` (only suggests columns from IDE helper, database introspection, or migrations).
 - `.env` file parser for reading database connection settings.
 - `database` configuration option in LSP initialization settings to enable/disable DB introspection.
+- Built-in diagnostics engine with standalone `internal/checks/` package reusable by CLI tools and CI pipelines.
+- Unused import detection with word-boundary scanning, aliased imports, `use function`/`use const`, and PHP 8 attributes.
+- Unused private method and property detection (excludes magic methods).
+- Unreachable code detection after `return`, `throw`, `exit`/`die`, `continue`, `break`.
+- Redundant union member detection (duplicates, `?Type|null`, supertype subsumption for `mixed`, `object`, `iterable`).
+- Redundant nullsafe `?->` operator detection on non-nullable types.
+- Unknown column validation in Builder string arguments (`where`, `orderBy`, `select`, `get`, etc.).
+- Unknown relation validation in Builder string arguments (`with`, `has`, `whereHas`, `load`, etc.).
+- Aggregate relation method second-arg validation (`withSum('relation', 'column')` checks column on the related model).
+- `DiagnosticTag` support: unused code greyed out (`Unnecessary`), deprecated functions struck through (`Deprecated`).
+- `diagnosticRules` configuration in `.php-lsp.json` to enable/disable individual diagnostic rules.
+- Multi-line method chain resolution for hover, go-to-definition, and completions.
+- `resolve.JoinChainLines()` helper to join continuation lines starting with `->`, `::`, or `?->`.
+- Comprehensive chain resolution test suite covering single-line and multi-line Eloquent method chains.
+
+### Fixed
+
+- Hover cards and go-to-definition landing on wrong vendor symbols when method chains span multiple lines.
+- Completion provider now resolves multi-line chains correctly instead of falling through to global completions.
 
 ## [0.1.0] - 2026-03-21
 
