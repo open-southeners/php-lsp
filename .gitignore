@@ -8,6 +8,6 @@ dist/
 .vscode-test/
 plans/
 .DS_Store
-/CLAUDE.md
+CLAUDE.md
 /php-lsp
 *.wasm
