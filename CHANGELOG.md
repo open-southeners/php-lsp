@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-03-24
+
+### Added
+
+- Generic-aware type resolution for template-annotated classes and methods, preserving concrete type parameters through completions, hover, and chained calls.
+- Generic-aware support for Laravel Eloquent builders and collections, including concrete model propagation for methods such as `query()`, `where()`, `get()`, `first()`, `find()`, and related collection helpers.
+- Array literal and array-shape inference in resolved expression types, improving type preservation for inferred variables and collection payloads.
+- Local `scripts/set-version.sh` utility to update repository version strings for releases.
+
+### Changed
+
+- Release automation now targets plain semantic version tags without the previous release prefix.
+- Expanded Laravel and Symfony end-to-end fixtures and coverage around generics, array shapes, and framework controller flows.
+
+### Fixed
+
+- Incorrect generic propagation across LSP completions, hover results, and shared resolver paths.
+- Variable type inference for generic return values, including Laravel helpers such as `Arr::first()` and `Collection::first()`.
+- Symfony test fixture compatibility issues that were causing CI instability.
+
 ## [0.2.0] - 2026-03-23
 
 ### Added
