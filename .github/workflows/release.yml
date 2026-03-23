@@ -113,7 +113,7 @@ jobs:
       - name: Publish to Github releases
         uses: softprops/action-gh-release@v2
         with:
-          name: php-lsp ${{ github.ref_name }}
+          name: ${{ github.ref_name }}
           body: ${{ steps.query-release-info.outputs.release-notes }}
           files: |
             dist/tusk-php-linux-amd64
