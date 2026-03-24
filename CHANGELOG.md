@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.2] - 2026-03-24
+
+### Fixed
+
+- VSCode extension shipping without bundled LSP binaries due to release CI not copying platform binaries into the extension's `bin/` directory before packaging the `.vsix`.
+
 ## [0.3.1] - 2026-03-24
 
 ### Fixed
