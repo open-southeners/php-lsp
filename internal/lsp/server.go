@@ -28,7 +28,7 @@ import (
 )
 
 const ServerName = "php-lsp"
-const ServerVersion = "0.3.1"
+const ServerVersion = "0.3.2"
 
 type Server struct {
 	cfg         *config.Config
