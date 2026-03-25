@@ -1,7 +1,9 @@
 package symbols
 
 import (
+	"net/url"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"sync"
@@ -880,8 +882,18 @@ func (idx *Index) GetAllFileURIs() []string {
 }
 
 func URIToPath(uri string) string {
-	path := strings.TrimPrefix(uri, "file://")
-	return filepath.Clean(path)
+	if u, err := url.Parse(uri); err == nil && u.Scheme == "file" {
+		// url.Parse decodes percent-encoding in the path (e.g. %3A → :)
+		p := u.Path
+		// On Windows, file URIs look like file:///C:/... → Path="/C:/..."
+		// Strip the leading slash before the drive letter.
+		if runtime.GOOS == "windows" && len(p) >= 3 && p[0] == '/' && p[2] == ':' {
+			p = p[1:]
+		}
+		return filepath.Clean(p)
+	}
+	// Not a URI — treat as a plain path.
+	return filepath.Clean(uri)
 }
 
 // PickBestStandalone selects the most appropriate symbol when multiple symbols

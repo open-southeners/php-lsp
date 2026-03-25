@@ -194,7 +194,7 @@ func (r *FrameworkArrayResolver) resolveFormRequestKeys(classFQN string) []types
 			if m.URI == "" || m.URI == "builtin" {
 				continue
 			}
-			path := strings.TrimPrefix(m.URI, "file://")
+			path := symbols.URIToPath(m.URI)
 			content, err := os.ReadFile(path)
 			if err != nil {
 				continue
@@ -212,7 +212,7 @@ func (r *FrameworkArrayResolver) resolveFormRequestKeys(classFQN string) []types
 				if m.URI == "" || m.URI == "builtin" {
 					continue
 				}
-				path := strings.TrimPrefix(m.URI, "file://")
+				path := symbols.URIToPath(m.URI)
 				content, err := os.ReadFile(path)
 				if err != nil {
 					continue

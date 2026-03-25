@@ -595,7 +595,7 @@ func findAccessLocations(uri, line string, lineNum int, needle string, skipChars
 
 // readFileFromDisk reads a file from disk given its URI.
 func (a *Analyzer) readFileFromDisk(uri string) string {
-	path := strings.TrimPrefix(uri, "file://")
+	path := symbols.URIToPath(uri)
 	content, err := os.ReadFile(path)
 	if err != nil {
 		return ""
@@ -1421,7 +1421,7 @@ func (a *Analyzer) MoveToNamespace(uri, source, targetNS string, autoloadEntries
 	// 3. Compute file move via PSR-4
 	newPath := composer.FQNToPath(newFQN, autoloadEntries)
 	if newPath != "" {
-		oldPath := strings.TrimPrefix(uri, "file://")
+		oldPath := symbols.URIToPath(uri)
 		if newPath != oldPath {
 			edit.DocumentChanges = append(edit.DocumentChanges, protocol.DocumentChange{
 				RenameFile: &protocol.RenameFile{

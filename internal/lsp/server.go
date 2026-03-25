@@ -228,8 +228,8 @@ func (s *Server) handleInitialize(msg *jsonRPCMessage) {
 		s.sendError(msg.ID, -32602, "Invalid params")
 		return
 	}
-	s.rootPath = strings.TrimPrefix(params.RootURI, "file://")
-	if s.rootPath == "" {
+	s.rootPath = symbols.URIToPath(params.RootURI)
+	if s.rootPath == "" || s.rootPath == "." {
 		s.rootPath = params.RootPath
 	}
 	s.logger.Printf("Initializing for workspace: %s", s.rootPath)
@@ -371,7 +371,7 @@ func (s *Server) handleDidSave(msg *jsonRPCMessage) {
 	s.goSafe("container.Analyze", s.container.Analyze)
 	if s.cfg.DiagnosticsEnabled {
 		s.goSafe("diagnostics.RunTools", func() {
-			filePath := strings.TrimPrefix(uri, "file://")
+			filePath := symbols.URIToPath(uri)
 			s.diag.RunTools(uri, filePath)
 			source := s.getDocument(uri)
 			s.diag.AnalyzeOnSave(uri, source)
@@ -498,7 +498,7 @@ func (s *Server) handleExecuteCommand(msg *jsonRPCMessage) {
 		if len(params.Arguments) > 0 {
 			var uri string
 			if json.Unmarshal(params.Arguments[0], &uri) == nil {
-				filePath := strings.TrimPrefix(uri, "file://")
+				filePath := symbols.URIToPath(uri)
 				autoload := composer.GetAutoloadPaths(s.rootPath)
 				ns := composer.PathToNamespace(filePath, autoload)
 				s.sendResponse(msg.ID, ns)
@@ -535,7 +535,7 @@ func (s *Server) getDocumentReader() func(string) string {
 			return source
 		}
 		// Fall back to reading from disk
-		path := strings.TrimPrefix(uri, "file://")
+		path := symbols.URIToPath(uri)
 		content, err := os.ReadFile(path)
 		if err != nil {
 			return ""
@@ -561,7 +561,7 @@ func (s *Server) publishDiagnostics(uri, source string) {
 
 // indexFileByURI indexes a file, using the IDE helper merge strategy for known IDE helper files.
 func (s *Server) indexFileByURI(uri string, source string) {
-	path := strings.TrimPrefix(uri, "file://")
+	path := symbols.URIToPath(uri)
 	if isIDEHelperFile(path) {
 		s.index.IndexIDEHelperFile(uri, source)
 	} else {

@@ -222,6 +222,10 @@ func TestURIToPath(t *testing.T) {
 	if got := URIToPath("/already/a/path"); got != "/already/a/path" {
 		t.Errorf("got %q", got)
 	}
+	// Percent-encoded characters should be decoded
+	if got := URIToPath("file:///home/user/my%20project/file.php"); got != "/home/user/my project/file.php" {
+		t.Errorf("percent decode: got %q", got)
+	}
 }
 
 func TestGetAllFileURIs(t *testing.T) {
