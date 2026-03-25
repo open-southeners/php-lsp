@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-03-25
+
+### Added
+
+- Laravel Facade support: static calls like `Cache::get()` now resolve through the container via `getFacadeAccessor()`, providing completions and hover cards from the concrete class's methods.
+- Facade concrete method completion: methods not declared in `@method static` annotations but present on the resolved concrete class are surfaced as static completions.
+- Nested trait member resolution at all depth levels (trait using another trait using another trait, etc.), propagating methods and properties through the full chain.
+
+### Fixed
+
+- `@method static` docblock annotations not setting `IsStatic` on virtual members, causing them to be filtered out of `ClassName::` completions.
+- Trait `use` declarations inside other traits being silently discarded by the parser, preventing nested trait members from appearing in completions and hover.
+- `traitMap` entries not being cleaned up on file re-index, causing stale trait associations to persist until process restart.
+- Windows workspace path containing percent-encoded characters (`%3A` for `:`) not being decoded, causing the LSP server to index zero files.
+- All `file://` URI-to-path conversions now use proper URL decoding and Windows drive letter handling via the shared `symbols.URIToPath` helper.
+
 ## [0.3.2] - 2026-03-24
 
 ### Fixed
